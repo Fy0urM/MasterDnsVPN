@@ -35,6 +35,7 @@ class MasterDnsVPNClient:
         self.udp_sock: Optional[socket.socket] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.should_stop: asyncio.Event = asyncio.Event()
+        self.session_restart_event = None
         self.config: dict = master_dns_vpn_config.__dict__
         self.logger = getLogger(log_level=self.config.get("LOG_LEVEL", "INFO"))
         self.resolvers: list = self.config.get("RESOLVER_DNS_SERVERS", [])
@@ -647,6 +648,7 @@ class MasterDnsVPNClient:
     async def _main_tunnel_loop(self):
         """Start local TCP server and main worker tasks."""
         self.logger.info("Entering VPN Tunnel Main Loop...")
+        self.session_restart_event = asyncio.Event()
         self.outbound_queue = asyncio.PriorityQueue()
         self.active_streams = {}
         self.pending_streams = {}
@@ -684,15 +686,55 @@ class MasterDnsVPNClient:
             f"<g>Ready! Local Proxy listening on {listen_ip}:{listen_port}</g>"
         )
 
-        self.loop.create_task(self._rx_worker())
+        self.workers = []
+        self.workers.append(self.loop.create_task(self._rx_worker()))
 
         for _ in range(self.config.get("NUM_DNS_WORKERS", 4)):
-            self.loop.create_task(self._tx_worker())
+            self.workers.append(self.loop.create_task(self._tx_worker()))
 
-        self.loop.create_task(self._retransmit_worker())
+        self.workers.append(self.loop.create_task(self._retransmit_worker()))
 
-        async with server:
-            await self.should_stop.wait()
+        stop_task = asyncio.create_task(self.should_stop.wait())
+        restart_task = asyncio.create_task(self.session_restart_event.wait())
+
+        await asyncio.wait(
+            [stop_task, restart_task], return_when=asyncio.FIRST_COMPLETED
+        )
+
+        stop_task.cancel()
+        restart_task.cancel()
+
+        self.logger.info("Cleaning up old connections before reconnecting...")
+
+        for w in self.workers:
+            w.cancel()
+
+        await asyncio.gather(*self.workers, return_exceptions=True)
+
+        for stream in list(self.active_streams.values()):
+            try:
+                await stream.close()
+            except Exception:
+                pass
+        self.active_streams.clear()
+
+        for sid, (reader, writer) in self.pending_streams.items():
+            try:
+                writer.close()
+            except Exception:
+                pass
+        self.pending_streams.clear()
+
+        try:
+            server.close()
+            await server.wait_closed()
+        except Exception:
+            pass
+
+        try:
+            self.tunnel_sock.close()
+        except Exception:
+            pass
 
     async def _rx_worker(self):
         """Continuously listen for incoming VPN packets on the tunnel socket."""
@@ -758,7 +800,7 @@ class MasterDnsVPNClient:
                 )
 
                 if idle_duration < 2.0:
-                    current_timeout = 0.05
+                    current_timeout = 0.01
                 elif idle_duration < 10.0:
                     current_timeout = 1.0
                 else:
@@ -829,6 +871,10 @@ class MasterDnsVPNClient:
                     self.tunnel_sock, dns_queries[0], (conn["resolver"], 53)
                 )
 
+                conn["total_packets"] = conn.get("total_packets", 0) + 1
+                if pkt_type == Packet_Type.STREAM_RESEND:
+                    conn["lost_packets"] = conn.get("lost_packets", 0) + 1
+
                 if pkt_type in (
                     Packet_Type.STREAM_DATA,
                     Packet_Type.STREAM_RESEND,
@@ -875,6 +921,14 @@ class MasterDnsVPNClient:
                 self.logger.info(f"<y>Stream {stream_id} Closed by server.</y>")
                 await self.active_streams[stream_id].close()
                 del self.active_streams[stream_id]
+
+        elif ptype == Packet_Type.ERROR_DROP:
+            self.logger.error(
+                "<red>Session dropped by server (Server Restarted or Invalid). Reconnecting...</red>"
+            )
+
+            if self.session_restart_event:
+                self.session_restart_event.set()
 
     async def _retransmit_worker(self):
         while not self.should_stop.is_set():
@@ -923,11 +977,13 @@ class MasterDnsVPNClient:
                 await self.run_client()
 
                 if not self.should_stop.is_set():
-                    self.logger.info("=" * 80)
-                    self.logger.warning(
-                        "<yellow>Restarting Client workflow in 10 seconds...</yellow>"
+                    self.logger.info(
+                        "================================================================================"
                     )
-                    await self._sleep(10)
+                    self.logger.warning(
+                        "<yellow>Restarting Client workflow in 2 seconds...</yellow>"
+                    )
+                    await self._sleep(2)
 
         except asyncio.CancelledError:
             self.logger.info("MasterDnsVPN Client is stopping...")

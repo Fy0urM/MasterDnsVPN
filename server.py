@@ -208,7 +208,20 @@ class MasterDnsVPNServer:
                 data=data,
             )
 
-        # --- KCP Routing (Streams) ---
+        if session_id not in self.sessions:
+            self.logger.warning(
+                f"Packet received for expired/invalid session {session_id} from {addr}. Dropping."
+            )
+            response_packet = await self.dns_parser.generate_vpn_response_packet(
+                domain=request_domain,
+                session_id=session_id,
+                packet_type=Packet_Type.ERROR_DROP,
+                data=b"INVALID",
+                question_packet=data,
+            )
+            return response_packet
+
+        # --- Routing (Streams) ---
         stream_id = extracted_header.get("stream_id", 0)
         sn = extracted_header.get("sequence_num", 0)
 
@@ -408,14 +421,16 @@ class MasterDnsVPNServer:
                 except asyncio.TimeoutError:
                     continue
             except OSError as e:
+                if getattr(e, "winerror", None) == 10054:
+                    continue
+
                 self.logger.error(f"Socket error: {e}. Exiting DNS request handler.")
                 continue
             except Exception as e:
                 self.logger.exception(f"Unexpected error receiving DNS request: {e}")
                 continue
-
             try:
-                self.loop.create_task(self.handle_single_request(data, addr))
+                self.loop.create_task(self._bounded_handle_request(data, addr))
             except Exception as e:
                 self.logger.error(f"Failed to create task for request from {addr}: {e}")
 
