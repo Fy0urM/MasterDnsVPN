@@ -1,11 +1,109 @@
 # 🚀 MasterDnsVPN
 
-MasterDnsVPN is a powerful, cross-platform DNS tunneling VPN written in Python. It enables secure and covert data transmission by encapsulating VPN traffic within DNS queries and responses, allowing users to bypass network restrictions and firewalls by leveraging DNS as a transport channel.
+## [نسخه فارسی](https://github.com/masterking32/MasterDnsVPN/blob/main/README_FA.MD) | [English Version](https://github.com/masterking32/MasterDnsVPN/blob/main/README.MD)
 
-MasterDnsVPN provides both server and client components, featuring robust encryption, flexible domain management, resolver balancing, and automatic MTU optimization. It is designed for bypassing censorship, enabling secure communication in restricted networks, and supporting research or educational purposes. For alternative DNS tunneling solutions, consider Dnstt, SlipStream, Iodine, or DNSCat2.
 
-# 🚧 UNDER DEVELOPMENT
-⚠️ This project is currently under development and is not yet fully functional. It is not ready for use at this time. 
+MasterDnsVPN is a high-performance DNS tunneling tool designed to encapsulate VPN traffic within DNS queries. This project is specifically engineered to bypass strict network censorship and firewalls where traditional VPN protocols are blocked.
+
+It features a custom **ARQ (Automatic Repeat Request)** implementation, ensuring TCP-like reliability and packet ordering over the inherently unreliable UDP-based DNS protocol.
+
+---
+
+## ✨ Key Features
+- 🛡️ **Censorship Circumvention:** Leverages the DNS protocol to tunnel traffic through restricted environments.
+- 🔐 **Robust Security:** Supports multiple encryption methods including XOR, AES-128-GCM, AES-192-GCM, and AES-256-GCM.
+- ⚙️ **Smart MTU Management:** Automatically probes and synchronizes the optimal Maximum Transmission Unit (MTU) for both upload and download.
+- 🔄 **Custom ARQ Protocol:** Solves packet loss and out-of-order delivery issues with dynamic retransmission and flow control.
+- ⚡ **Resolver Load Balancing:** Supports multiple DNS resolvers with adaptive balancing strategies (Random, Round-robin, Best-loss).
+- 🌐 **TCP Multiplexing:** Allows multiple local TCP connections to be multiplexed over a single DNS session.
+
+---
+
+## 🛠️ Network Prerequisites (DNS Configuration)
+
+To make the tunnel functional, you must own a domain and configure the following records in your DNS management panel (e.g., Cloudflare):
+
+1. **A Record:** Create an **A** record pointing to your server's public IP.
+   - Example: `s.example.com` -> `1.2.3.4`
+2. **NS Record:** Create an **NS** record for your tunnel subdomain pointing to the A record created above.
+   - Example: `v.example.com` -> `s.example.com`
+
+> 💡 **Pro Tip:** The shorter your domain and subdomain names are (e.g., `v.ex.com`), the more space remains for actual data payloads in each DNS packet, significantly increasing throughput.
+
+---
+
+## 📦 Requirements
+
+- 🐍 Python 3.7 or higher
+- 🔐 cryptography (Required for AES encryption methods)
+- 📝 loguru (For enhanced logging)
+
+---
+
+## 🚀 Installation & Usage
+
+### 1. Install Dependencies
+
+Clone the repository and install the required Python libraries:
+```bash
+git clone [https://github.com/masterking32/MasterDnsVPN.git](https://github.com/masterking32/MasterDnsVPN.git)
+cd MasterDnsVPN
+pip install -r requirements.txt
+```
+
+### 2. Server Configuration
+
+Copy the sample configuration:
+
+```bash
+cp server_config.py.simple server_config.py
+```
+
+Edit `server_config.py` to include your domain and target forwarding IP/Port.
+- Install a proxy server (e.g., SOCKS5, VLESS, VMESS, SSH and etc) on the server machine to forward traffic to the internet.
+- Configure `FORWARD_IP` and `FORWARD_PORT` in `server_config.py` to point to your proxy server.
+- Configure `DOMAIN` to match the subdomain you set up in your DNS records (e.g., `v.example.com`).
+- After the first run, note the optimal MTU values for download and upload, then set `MAX_UPLOAD_MTU` and `MAX_DOWNLOAD_MTU` in `server_config.py` accordingly. This will significantly speed up subsequent runs.
+
+### 3. Run the Server
+
+```bash
+python server.py
+```
+
+On the first run, the server will generate an encryption key. Save this key; you will need it to configure the client.
+
+### 4. Configure the Client
+
+Copy the sample client configuration:
+
+```bash
+cp client_config.py.simple client_config.py
+```
+
+Configure client_config.py:
+
+ - DOMAINS: Your tunnel subdomain (e.g., v.example.com).
+
+ - ENCRYPTION_KEY: The key provided by your server.
+
+ - RESOLVER_DNS_SERVERS: List of public DNS resolvers (e.g., 8.8.8.8, 1.1.1.1).
+
+### 5. Run the Client
+
+```bash
+python client.py
+```
+
+---
+
+# 📝 Technical Notes
+
+- ⚡ MTU Optimization: Upon connection, the client performs a binary search to find the maximum possible MTU for your specific path. This ensures maximum speed without packet fragmentation.
+
+- 🔄 Adaptive Polling: The client uses smart backoff and idle-check mechanisms to reduce DNS overhead when no traffic is being transmitted.
+
+- 🔒 Encryption: If using AES methods, the cryptography library is required. For low-resource devices, XOR (Method 1) is recommended.
 
 ---
 
@@ -13,83 +111,15 @@ MasterDnsVPN provides both server and client components, featuring robust encryp
 
 ```
 ┌────────────┐      DNS Queries     ┌────────────┐      ┌────────────┐
-│  Client    │  <---------------->  │   Server   │ <--> │  Internet  │
-│ (Python)   │    (Encapsulated)    │  (Python)  │      │   (DNS)    │
+│  Client    │  <---------------->  │   Server   │ <--> │   Proxy    │
+│ (Python)   │    (Encapsulated)    │  (Python)  │      │   Server   │
 └────────────┘                      └────────────┘      └────────────┘
 ```
 
 1. 🗝️ Client encodes and encrypts VPN data into DNS queries.
-2. 🔓 Server decodes, decrypts, and forwards data to the internet.
+2. 🔓 Server decodes, decrypts, and forwards the traffic to your local Proxy Server (VLESS/SOCKS5).
 3. 🔁 Replies are sent back via DNS responses.
 
----
-
-## ✨ Features
-- 🛡️ DNS tunneling for VPN traffic (bypass firewalls and censorship)
-- 🐍 Simple, readable Python codebase
-- ⚙️ Configurable server and client with easy Python config files
-- 🔒 Multiple encryption methods: XOR, ChaCha20, AES-CTR (128/192/256) + SSL
-- 🌐 Support for multiple tunnel domains and DNS resolvers
-- 📏 MTU testing and optimization for upload/download
-- 🎲 Resolver balancing strategies: random, round robin, least packet loss
-- 🚫 Automatic exclusion of slow or lossy resolvers
-- 📋 Logging with selectable verbosity
-- 💻 Cross-platform (Windows, Linux, macOS; Python 3.6+)
-
-## 📦 Requirements
-- 🐍 Python 3.6 or higher
-
----
-
-## ⚡ Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/masterking32/MasterDnsVPN.git
-   cd MasterDnsVPN
-   ```
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
----
-
-## 🚀 Quick Start
-
-### 1. 🖥️ Server Setup
-1. Copy and edit the config:
-   ```bash
-   cp server_config.py.simple server_config.py
-   # Edit server_config.py as needed
-   ```
-2. Run the server:
-   ```bash
-   python server.py
-   ```
-
-### 2. 💻 Client Setup
-1. Copy and edit the config:
-   ```bash
-   cp client_config.py.simple client_config.py
-   # Edit client_config.py as needed
-   ```
-2. Run the client:
-   ```bash
-   python client.py
-   ```
-
----
-
-## 📝 Configuration Tips
-
-- 🌍 **Domains:** Use your own domain(s) pointed to the server's IP for tunneling.
-- 🔑 **Encryption:** Set the same encryption method and key on both client and server. The key is generated by the server on first run (see logs).
-- ⚡ **Resolvers:** Use fast, reliable DNS resolvers for best performance.
-- 📏 **MTU:** The client will test and recommend optimal MTU values for upload/download.
-- 🚫 **Packet Loss:** Remove or comment out slow/losing resolvers in the client config.
-
----
 
 ## 🤝 Contributing
 Contributions are welcome! Please fork the repository and create a pull request with your changes.
