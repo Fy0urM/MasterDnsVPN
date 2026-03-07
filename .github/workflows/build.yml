@@ -55,6 +55,17 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clean build environment
+        run: |
+          find . -name "*.pyc" -delete
+          find . -name "__pycache__" -delete
+          rm -rf build/ dist/ *.spec
+
+      - name: Log Current SHA
+        run: git rev-parse HEAD
 
       - name: Set up Python
         uses: actions/setup-python@v5
