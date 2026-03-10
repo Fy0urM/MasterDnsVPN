@@ -559,20 +559,6 @@ class MasterDnsVPNClient:
             suggestion_number = 1
             not_important_suggestion_number = 1
 
-            raw_header = bytes([0, Packet_Type.STREAM_DATA, 0, 0, 0, 0, 0, 0, 0, 0])
-            if self.encryption_method == 0:
-                enc_header = raw_header
-            else:
-                enc_header = self.dns_parser.codec_transform(raw_header, encrypt=True)
-
-            base36_header = self.dns_parser.base_encode(enc_header, lowerCaseOnly=True)
-            prefix_len = len(base36_header) + 3
-
-            available_txt_chars = 191 - prefix_len
-
-            max_enc_down_bytes = (available_txt_chars // 4) * 3
-            optimal_down_mtu = max_enc_down_bytes - self.crypto_overhead
-
             unique_domains = set(self.domains)
             max_len_domain = max(unique_domains, key=len) if unique_domains else ""
             if len(unique_domains) > 1:
@@ -772,6 +758,94 @@ class MasterDnsVPNClient:
                     domain=max_len_domain, mtu=0
                 )
 
+                optimal_up_mtu = max_up_bytes
+
+                if optimal_up_mtu < 90:
+                    self.logger.info(
+                        "<yellow>   - <magenta>[Suggestion "
+                        + str(suggestion_number)
+                        + "]:</magenta> Based on your longest domain name, the maximum achievable upload MTU is estimated to be around <red>"
+                        + str(optimal_up_mtu)
+                        + "</red> bytes, which is quite low. Consider using shorter domain names in your configuration to improve performance, as longer domain names can significantly reduce the maximum achievable MTU.</yellow>"
+                    )
+                    suggestion_number += 1
+
+                suggest_min_up_mtu = optimal_up_mtu - 3
+                if self.min_upload_mtu < suggest_min_up_mtu:
+                    self.logger.info(
+                        "<yellow>   - <magenta>[Suggestion "
+                        + str(suggestion_number)
+                        + "]:</magenta> Based on the estimated maximum upload MTU of <cyan>"
+                        + str(optimal_up_mtu)
+                        + "</cyan> bytes, consider setting <cyan>MIN_UPLOAD_MTU</cyan> to around <green>"
+                        + str(suggest_min_up_mtu)
+                        + " - "
+                        + str(optimal_up_mtu)
+                        + "</green> bytes. This can help ensure you get the best performance while avoiding servers with very low MTU limits.</yellow>"
+                    )
+                    suggestion_number += 1
+
+                if self.max_upload_mtu > optimal_up_mtu:
+                    self.logger.info(
+                        "<yellow>   - <magenta>[Suggestion "
+                        + str(suggestion_number)
+                        + "]:</magenta> Based on the estimated maximum upload MTU of <cyan>"
+                        + str(optimal_up_mtu)
+                        + "</cyan> bytes, consider setting <cyan>MAX_UPLOAD_MTU</cyan> to around <green>"
+                        + str(suggest_min_up_mtu)
+                        + " - "
+                        + str(optimal_up_mtu)
+                        + "</green> bytes. Setting it higher than the estimated maximum may lead to more failed connections during MTU testing, as some servers may drop packets that exceed their MTU limits.</yellow>"
+                    )
+                    suggestion_number += 1
+
+                if self.min_upload_mtu > optimal_up_mtu:
+                    self.logger.info(
+                        "<yellow>   - <magenta>[Suggestion "
+                        + str(suggestion_number)
+                        + "]:</magenta> Your current <cyan>MIN_UPLOAD_MTU</cyan> of <red>"
+                        + str(self.min_upload_mtu)
+                        + "</red> bytes is higher than the estimated maximum upload MTU of <cyan>"
+                        + str(optimal_up_mtu)
+                        + "</cyan> bytes based on your longest domain name. Consider reducing <cyan>MIN_UPLOAD_MTU</cyan> to around <green>"
+                        + str(suggest_min_up_mtu)
+                        + " - "
+                        + str(optimal_up_mtu)
+                        + "</green> bytes to improve the chances of successful connections and better performance.</yellow>"
+                    )
+                    suggestion_number += 1
+
+                if self.max_upload_mtu < optimal_up_mtu:
+                    self.logger.info(
+                        "<yellow>   - <magenta>[Suggestion "
+                        + str(suggestion_number)
+                        + "]:</magenta> Your current <cyan>MAX_UPLOAD_MTU</cyan> of <red>"
+                        + str(self.max_upload_mtu)
+                        + "</red> bytes is lower than the estimated maximum upload MTU of <cyan>"
+                        + str(optimal_up_mtu)
+                        + "</cyan> bytes based on your longest domain name. Consider increasing <cyan>MAX_UPLOAD_MTU</cyan> to around <green>"
+                        + str(suggest_min_up_mtu)
+                        + " - "
+                        + str(optimal_up_mtu)
+                        + "</green> bytes to allow for better performance, as some servers may support higher MTU limits.</yellow>"
+                    )
+                    suggestion_number += 1
+
+                if self.min_upload_mtu > self.max_upload_mtu:
+                    self.logger.info(
+                        "<yellow>   - <magenta>[Suggestion "
+                        + str(suggestion_number)
+                        + "]:</magenta> Your current <cyan>MIN_UPLOAD_MTU</cyan> of <red>"
+                        + str(self.min_upload_mtu)
+                        + "</red> bytes is higher than your current <cyan>MAX_UPLOAD_MTU</cyan> of <red>"
+                        + str(self.max_upload_mtu)
+                        + "</red> bytes. This configuration will cause all MTU tests to fail, as the minimum MTU cannot be greater than the maximum MTU. Consider adjusting these values to ensure that <cyan>MIN_UPLOAD_MTU</cyan> is less than or equal to <cyan>MAX_UPLOAD_MTU</cyan>.</yellow>"
+                    )
+                    suggestion_number += 1
+
+                self.max_upload_mtu = min(self.max_upload_mtu, optimal_up_mtu)
+                self.min_upload_mtu = min(self.min_upload_mtu, self.max_upload_mtu)
+
             except Exception as _:
                 pass
             wait_time = 0
@@ -799,9 +873,13 @@ class MasterDnsVPNClient:
                     f"<fg #e8a251>Waiting for <cyan>{wait_time}</cyan> seconds before starting MTU tests...</fg #e8a251>"
                 )
                 self.logger.info(
-                    "<fg #51e8bd>Press <cyan>ENTER</cyan> key to skip the wait and start immediately...</fg #51e8bd>"
+                    "<fg #51e8bd>Press <green>ENTER</green> key to skip the wait and start immediately...</fg #51e8bd>"
                 )
 
+                self.logger.info(
+                    "<fg #e85151>You can press <cyan>CTRL+C</cyan> to stop the client at any time. "
+                    "After stopping, review the suggestions, fix your configuration, and run the program again!</fg #e85151>"
+                )
                 await asyncio.wait_for(
                     self.loop.run_in_executor(None, input), timeout=wait_time
                 )

@@ -118,7 +118,7 @@ ARQ_WINDOW_SIZE = 3000
 
 # Retransmission TimeOut settings (Seconds)
 ARQ_INITIAL_RTO = 0.2
-ARQ_MAX_RTO = 1.5
+ARQ_MAX_RTO = 1.0
 
 # Time (seconds) to wait for a DNS query response before considering it lost and retransmitting.
 DNS_QUERY_TIMEOUT = 5.0
