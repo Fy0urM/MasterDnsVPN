@@ -255,13 +255,11 @@ class MasterDnsVPNServer:
         response_bytes = (
             client_token + b":" + str(new_session_id).encode("ascii", errors="ignore")
         )
-        data_bytes = self.dns_parser.codec_transform(response_bytes, encrypt=True)
-
         response_packet = self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=new_session_id,
             packet_type=Packet_Type.SESSION_ACCEPT,
-            data=data_bytes,
+            data=response_bytes,
             question_packet=data,
         )
 
@@ -683,15 +681,11 @@ class MasterDnsVPNServer:
         if res_ptype == Packet_Type.PONG:
             res_data = b"PO:" + os.urandom(4)
 
-        res_encrypted_data = (
-            self.dns_parser.codec_transform(res_data, encrypt=True) if res_data else b""
-        )
-
         return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id,
             packet_type=res_ptype,
-            data=res_encrypted_data,
+            data=res_data,
             question_packet=data,
             stream_id=res_stream_id,
             sequence_num=res_sn,
@@ -1001,7 +995,7 @@ class MasterDnsVPNServer:
             domain=request_domain,
             session_id=session_id,
             packet_type=Packet_Type.SET_MTU_RES,
-            data=self.dns_parser.codec_transform(sync_token, encrypt=True),
+            data=sync_token,
             question_packet=data,
         )
 
@@ -1050,13 +1044,11 @@ class MasterDnsVPNServer:
         else:
             raw_plaintext = download_size_bytes[:download_size]
 
-        data_bytes = self.dns_parser.codec_transform(raw_plaintext, encrypt=True)
-
         return self.dns_parser.generate_vpn_response_packet(
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_DOWN_RES,
-            data=data_bytes,
+            data=raw_plaintext,
             question_packet=data,
         )
 
@@ -1075,7 +1067,7 @@ class MasterDnsVPNServer:
             domain=request_domain,
             session_id=session_id if session_id is not None else 255,
             packet_type=Packet_Type.MTU_UP_RES,
-            data=self.dns_parser.codec_transform(b"1", encrypt=True),
+            data=b"1",
             question_packet=data,
         )
 

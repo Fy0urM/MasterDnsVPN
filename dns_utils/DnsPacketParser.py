@@ -787,6 +787,103 @@ class DnsPacketParser:
 
         return data_labels
 
+    def extract_txt_from_rData_bytes(self, rData: bytes) -> bytes:
+        """
+        Extract and concatenate all TXT chunks from the rData field as raw bytes.
+        """
+        if not rData:
+            return b""
+
+        extracted = []
+        offset = 0
+        total_len = len(rData)
+        _append = extracted.append
+
+        while offset < total_len:
+            length = rData[offset]
+            offset += 1
+            if length == 0:
+                continue
+
+            _append(rData[offset : offset + length])
+            offset += length
+
+        return b"".join(extracted)
+
+    def extract_vpn_response(self, parsed_packet: dict) -> tuple[dict, bytes]:
+        """
+        Extracts header and assembles chunked data from the DNS answers section.
+        Returns (parsed_header_dict, decrypted_data_bytes).
+        """
+        if not parsed_packet or not parsed_packet.get("answers"):
+            return None, b""
+
+        chunks = {}
+        header_dict = None
+        total_expected = 1
+        is_chunked = False
+
+        answers = parsed_packet.get("answers", [])
+        is_multi = len(answers) > 1
+
+        for answer in answers:
+            if answer.get("type") != DNS_Record_Type.TXT:
+                continue
+
+            raw_txt = self.extract_txt_from_rData_bytes(answer["rData"])
+            if not raw_txt:
+                continue
+
+            if is_multi:
+                if raw_txt[0] == 0x00:
+                    # Chunk 0: [0x00] [TotalChunks] [RawHeader] [Data...]
+                    is_chunked = True
+                    if len(raw_txt) < 4:
+                        continue
+                    total_expected = raw_txt[1]
+
+                    # Offset=2 skips the [0x00] and [TotalChunks] bytes
+                    parsed_hdr, hlen = self.parse_vpn_header_bytes(
+                        raw_txt, offset=2, return_length=True
+                    )
+                    if not parsed_hdr:
+                        continue
+                    header_dict = parsed_hdr
+                    chunks[0] = raw_txt[2 + hlen :]
+                else:
+                    # Chunk N: [ChunkID] [Data...]
+                    is_chunked = True
+                    chunk_id = raw_txt[0]
+                    chunks[chunk_id] = raw_txt[1:]
+            else:
+                # Single Packet: [RawHeader] [Data...]
+                is_chunked = False
+                total_expected = 1
+
+                # Offset=0 because header starts immediately
+                parsed_hdr, hlen = self.parse_vpn_header_bytes(
+                    raw_txt, offset=0, return_length=True
+                )
+                if not parsed_hdr:
+                    continue
+                header_dict = parsed_hdr
+                chunks[0] = raw_txt[hlen:]
+
+        if not header_dict:
+            return None, b""
+
+        if is_chunked:
+            if len(chunks) != total_expected:
+                return None, b""
+            # Ensure all pieces are present
+            for i in range(total_expected):
+                if i not in chunks:
+                    return None, b""
+
+        assembled_data_bytes = b"".join(chunks[i] for i in range(total_expected))
+
+        return header_dict, assembled_data_bytes
+
     def generate_vpn_response_packet(
         self,
         domain: str,
@@ -800,7 +897,7 @@ class DnsPacketParser:
         total_fragments: int = 0,
         total_data_length: int = 0,
     ) -> bytes:
-        header = self.create_vpn_header(
+        header_b = self.create_vpn_header(
             session_id,
             packet_type,
             False,
@@ -809,76 +906,92 @@ class DnsPacketParser:
             fragment_id,
             total_fragments,
             total_data_length,
+            encrypt_data=False,
+            base_encode=False,
         )
 
-        header_b = header.encode("ascii", errors="ignore")
-        header_dot = header_b + b"."
+        _len = len
+        _bytes = bytes
 
         txt_type = DNS_Record_Type.TXT
         in_class = DNS_QClass.IN
         simple_ans = self.simple_answer_packet
         answers = []
-        append = answers.append
+        _append = answers.append
 
-        data_str = self.base_encode(data, lowerCaseOnly=False)
-
-        if not data_str:
-            append(
+        # Condition 1: No Data (Send strictly the header)
+        if not data:
+            hb_len = _len(header_b)
+            _append(
                 {
                     "name": domain,
                     "type": txt_type,
                     "class": in_class,
                     "TTL": 0,
-                    "rData": bytes((len(header_dot),)) + header_dot,
+                    "rData": _bytes([hb_len]) + header_b,
                 }
             )
             return simple_ans(answers, question_packet)
 
-        data_bytes = data_str.encode("ascii", errors="ignore")
-        data_len = len(data_bytes)
+        # Condition 2: Fits in single packet
+        single_payload = header_b + data
+        payload_len = _len(single_payload)
 
-        if data_len + len(header_dot) <= 255:
-            full_chunk = header_dot + data_bytes
-            append(
+        if payload_len <= 255:
+            _append(
                 {
                     "name": domain,
                     "type": txt_type,
                     "class": in_class,
                     "TTL": 0,
-                    "rData": bytes((len(full_chunk),)) + full_chunk,
+                    "rData": _bytes([payload_len]) + single_payload,
                 }
             )
             return simple_ans(answers, question_packet)
 
-        cur = 0
-        chunk_id = 0
+        # Condition 3: Chunked Data
+        chunk0_prefix = _bytes([0x00, 0])
+        chunk0_header = chunk0_prefix + header_b
+        max_chunk0_data = 255 - _len(chunk0_header)
 
-        int_cache = self._int_bytes_cache
-        header_prefix = header_dot + b"0."
+        chunk0_payload = data[:max_chunk0_data]
+        remaining_data_len = _len(data) - max_chunk0_data
 
+        total_chunks = 1 + (remaining_data_len + 253) // 254
+
+        if total_chunks > 255:
+            self.logger.error("Data too large, exceeds maximum 255 fragments.")
+            return simple_ans(answers, question_packet)
+
+        # Append Chunk 0
+        full_chunk0 = _bytes([0x00, total_chunks]) + header_b + chunk0_payload
+        _append(
+            {
+                "name": domain,
+                "type": txt_type,
+                "class": in_class,
+                "TTL": 0,
+                "rData": _bytes([_len(full_chunk0)]) + full_chunk0,
+            }
+        )
+
+        cur = max_chunk0_data
+        chunk_id = 1
+        data_len = _len(data)
+
+        # Append subsequent Chunks (ID: N, Data...)
         while cur < data_len:
-            if chunk_id == 0:
-                prefix = header_prefix
-            else:
-                prefix = int_cache.get(chunk_id) or (str(chunk_id) + ".").encode(
-                    "ascii"
-                )
-
-            available_space = 255 - len(prefix)
-            chunk_payload = data_bytes[cur : cur + available_space]
-            full_chunk = prefix + chunk_payload
-
-            append(
+            chunk = _bytes([chunk_id]) + data[cur : cur + 254]
+            _append(
                 {
                     "name": domain,
                     "type": txt_type,
                     "class": in_class,
                     "TTL": 0,
-                    "rData": bytes((len(full_chunk),)) + full_chunk,
+                    "rData": _bytes([_len(chunk)]) + chunk,
                 }
             )
-
-            cur += available_space
+            cur += 254
             chunk_id += 1
 
         return simple_ans(answers, question_packet)
@@ -1076,48 +1189,50 @@ class DnsPacketParser:
             self.logger.error(f"Failed to extract VPN data: {e}")
             return b""
 
-    def parse_vpn_header_bytes(self, header_bytes: bytes) -> dict:
+    def parse_vpn_header_bytes(
+        self, header_bytes: bytes, offset: int = 0, return_length: bool = False
+    ):
         """
-        Reverse of create_vpn_header. Parses dynamic header bytes into a dictionary.
+        Parses dynamic header bytes into a dictionary.
+        If return_length is True, returns (header_data_dict, header_byte_length).
         """
-        if not header_bytes or len(header_bytes) < 2:
-            return None
-
         hb = header_bytes
         ln = len(hb)
-        ptype = hb[1]
+        if ln < offset + 2:
+            return (None, 0) if return_length else None
 
-        header_data = {"session_id": hb[0], "packet_type": ptype}
+        session_id = hb[offset]
+        ptype = hb[offset + 1]
 
-        off = 2
+        header_data = {"session_id": session_id, "packet_type": ptype}
+
+        off = offset + 2
         PT_STREAM = self._PT_STREAM_EXT
         PT_SEQ = self._PT_SEQ_EXT
         PT_FRAG = self._PT_FRAG_EXT
 
-        # STREAM: need 2 bytes
         if ptype in PT_STREAM:
             if ln < off + 2:
-                return None
+                return (None, 0) if return_length else None
             header_data["stream_id"] = (hb[off] << 8) | hb[off + 1]
             off += 2
 
-        # SEQ: need 2 bytes
         if ptype in PT_SEQ:
             if ln < off + 2:
-                return None
+                return (None, 0) if return_length else None
             header_data["sequence_num"] = (hb[off] << 8) | hb[off + 1]
             off += 2
 
-        # FRAG: need 1 byte, and possibly extra 3 bytes when seq==0 and frag==0
         if ptype in PT_FRAG:
             if ln < off + 4:
-                return None
-
-            frag = hb[off]
-            header_data["fragment_id"] = frag
+                return (None, 0) if return_length else None
+            header_data["fragment_id"] = hb[off]
             header_data["total_fragments"] = hb[off + 1]
             header_data["total_data_length"] = (hb[off + 2] << 8) | hb[off + 3]
+            off += 4
 
+        if return_length:
+            return header_data, off - offset
         return header_data
 
     #
@@ -1154,6 +1269,8 @@ class DnsPacketParser:
         fragment_id: int = 0,
         total_fragments: int = 0,
         total_data_length: int = 0,
+        encrypt_data: bool = True,
+        base_encode: bool = True,
     ) -> str:
         """
         Construct custom VPN header for a DNS packet.
@@ -1166,6 +1283,9 @@ class DnsPacketParser:
             sequence_num (int): Sequence number for STREAM_DATA packets (0-65535).
             fragment_id (int): Fragment ID for STREAM_DATA packets (0-255).
             total_fragments (int): Total fragments for the stream (0-255).
+            total_data_length (int): Total data length for the stream (0-65535).
+            encrypt_data (bool): Whether to encrypt the header.
+            base_encode (bool): Whether to base36 encode the header.
         Returns:
             str: Encoded VPN header.
 
@@ -1192,9 +1312,12 @@ class DnsPacketParser:
 
         raw_header = bytes(h_list)
 
-        if self.encryption_method == 0:
+        if not encrypt_data or self.encryption_method == 0:
             encrypted_header = raw_header
         else:
             encrypted_header = self.codec_transform(raw_header, encrypt=True)
+
+        if not base_encode:
+            return encrypted_header
 
         return self.base_encode(encrypted_header, lowerCaseOnly=base36_encode)
