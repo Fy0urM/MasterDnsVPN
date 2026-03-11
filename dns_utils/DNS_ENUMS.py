@@ -33,6 +33,7 @@ class Packet_Type:
     SOCKS5_SYN_ACK = 0x13  # Server acknowledges SOCKS5 handshake
     STREAM_FIN_ACK = 0x14  # ACK for STREAM_FIN
     STREAM_RST = 0x15  # Abort/reset stream immediately
+    STREAM_RST_ACK = 0x16  # ACK for STREAM_RST
     ERROR_DROP = 0xFF  # Invalid/Drop signal
 
 

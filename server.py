@@ -458,6 +458,11 @@ class MasterDnsVPNServer:
                     session_id, 0, stream_id, sn, b"", is_fin_ack=True
                 )
                 return None
+            elif packet_type == Packet_Type.STREAM_RST:
+                await self._server_enqueue_tx(
+                    session_id, 0, stream_id, sn, b"", is_rst_ack=True
+                )
+                return None
             elif packet_type in (
                 Packet_Type.STREAM_DATA,
                 Packet_Type.STREAM_RESEND,
@@ -627,18 +632,34 @@ class MasterDnsVPNServer:
             else:
                 await self.close_stream(session_id, stream_id, reason="Client sent FIN")
         elif packet_type == Packet_Type.STREAM_RST:
+            await self._server_enqueue_tx(
+                session_id, 0, stream_id, sn, b"", is_rst_ack=True
+            )
+
             stream_data = streams.get(stream_id)
             if stream_data:
                 arq = stream_data.get("arq_obj")
                 if arq:
                     arq._rst_received = True
+                    arq._rst_seq_received = sn
 
             await self.close_stream(
                 session_id,
                 stream_id,
                 reason="Connection Reset By Client (RST)",
                 abortive=True,
+                remote_reset=True,
             )
+        elif packet_type == Packet_Type.STREAM_RST_ACK:
+            stream_data = streams.get(stream_id)
+            if stream_data:
+                arq = stream_data.get("arq_obj")
+                if arq and getattr(arq, "_rst_seq_sent", None) == sn:
+                    arq._rst_acked = True
+                    stream_data["rst_retries"] = 99
+                elif stream_data.get("rst_seq_sent") == sn:
+                    stream_data["rst_acked"] = True
+                    stream_data["rst_retries"] = 99
         elif packet_type == Packet_Type.STREAM_FIN_ACK:
             stream_data = streams.get(stream_id)
             if stream_data:
@@ -1207,6 +1228,7 @@ class MasterDnsVPNServer:
         stream_id: int,
         reason: str = "Unknown",
         abortive: bool = False,
+        remote_reset: bool = False,
     ) -> None:
         """Safely close a specific stream without sending FIN before snd_buf is drained."""
         session = self.sessions.get(session_id)
@@ -1253,18 +1275,26 @@ class MasterDnsVPNServer:
         if arq_obj:
             try:
                 if abortive:
-                    await arq_obj.abort(reason=reason)
+                    if remote_reset or getattr(arq_obj, "_rst_received", False):
+                        await arq_obj.close(reason=reason, send_fin=False)
+                    else:
+                        await arq_obj.abort(reason=reason)
                 elif not getattr(arq_obj, "closed", False):
                     await arq_obj.close(reason=reason, send_fin=True)
             except Exception as e:
                 self.logger.debug(f"Error closing ARQStream {stream_id}: {e}")
         else:
-            if abortive:
+            if abortive and not remote_reset:
+                rst_sn = stream_data.get("rst_seq_sent", 0)
+                stream_data["rst_sent"] = True
+                stream_data["rst_acked"] = False
+                stream_data["rst_seq_sent"] = rst_sn
+
                 rst_data = b"RST:" + os.urandom(4)
                 await self._server_enqueue_tx(
-                    session_id, 0, stream_id, 0, rst_data, is_rst=True
+                    session_id, 0, stream_id, rst_sn, rst_data, is_rst=True
                 )
-            else:
+            elif not abortive:
                 fin_data = b"FIN:" + os.urandom(4)
                 await self._server_enqueue_tx(
                     session_id, 1, stream_id, 0, fin_data, is_fin=True
@@ -1305,6 +1335,7 @@ class MasterDnsVPNServer:
         is_fin=False,
         is_fin_ack=False,
         is_rst=False,
+        is_rst_ack=False,
         is_syn_ack=False,
         is_socks_syn_ack=False,
         is_resend=False,
@@ -1324,6 +1355,9 @@ class MasterDnsVPNServer:
             eff_priority = 4
         elif is_rst:
             ptype = Packet_Type.STREAM_RST
+            eff_priority = 0
+        elif is_rst_ack:
+            ptype = Packet_Type.STREAM_RST_ACK
             eff_priority = 0
         elif is_fin_ack:
             ptype = Packet_Type.STREAM_FIN_ACK
@@ -1373,7 +1407,7 @@ class MasterDnsVPNServer:
         else:
             stream_data = session.get("streams", {}).get(stream_id)
             if not stream_data:
-                if is_rst or is_fin_ack:
+                if is_rst or is_fin_ack or is_rst_ack:
                     heapq.heappush(session["main_queue"], queue_item)
                 return
 
@@ -1510,11 +1544,64 @@ class MasterDnsVPNServer:
                         close_time = stream_data.get("close_time", now)
 
                         if status == "TIME_WAIT":
+                            arq_obj = stream_data.get("arq_obj")
+
+                            rst_sent = (
+                                getattr(arq_obj, "_rst_sent", False)
+                                if arq_obj
+                                else stream_data.get("rst_sent", False)
+                            )
+                            rst_acked = (
+                                getattr(arq_obj, "_rst_acked", False)
+                                if arq_obj
+                                else stream_data.get("rst_acked", False)
+                            )
+                            rst_received = (
+                                getattr(arq_obj, "_rst_received", False)
+                                if arq_obj
+                                else False
+                            )
+
                             if (now - close_time) > 45.0:
                                 streams.pop(sid, None)
-                            elif (now - last_act) > 3.0 and stream_data.get(
-                                "fin_retries", 0
-                            ) < 15:
+
+                            elif (
+                                rst_sent
+                                and not rst_acked
+                                and (now - last_act) > 1.5
+                                and stream_data.get("rst_retries", 0) < 10
+                            ):
+                                stream_data["last_activity"] = now
+                                stream_data["rst_retries"] = (
+                                    stream_data.get("rst_retries", 0) + 1
+                                )
+
+                                rst_sn = (
+                                    getattr(arq_obj, "_rst_seq_sent", None)
+                                    if arq_obj
+                                    else stream_data.get("rst_seq_sent", 0)
+                                )
+
+                                if rst_sn is not None:
+                                    rst_data = b"RST:" + os.urandom(4)
+                                    await self._server_enqueue_tx(
+                                        session_id,
+                                        0,
+                                        sid,
+                                        rst_sn,
+                                        rst_data,
+                                        is_rst=True,
+                                    )
+
+                            elif (
+                                not rst_sent
+                                and not rst_received
+                                and not (
+                                    arq_obj and getattr(arq_obj, "_fin_acked", False)
+                                )
+                                and (now - last_act) > 3.0
+                                and stream_data.get("fin_retries", 0) < 15
+                            ):
                                 stream_data["last_activity"] = now
                                 stream_data["fin_retries"] = (
                                     stream_data.get("fin_retries", 0) + 1
@@ -1522,7 +1609,6 @@ class MasterDnsVPNServer:
                                 fin_data = b"FIN:" + os.urandom(4)
 
                                 fin_sn = 0
-                                arq_obj = stream_data.get("arq_obj")
                                 if (
                                     arq_obj
                                     and getattr(arq_obj, "_fin_seq_sent", None)

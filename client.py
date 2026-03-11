@@ -960,7 +960,7 @@ class MasterDnsVPNClient:
                     return False
 
                 response = await self._send_and_receive_dns(
-                    dns_queries[0], resolver, 53, self.timeout
+                    dns_queries[0], resolver, 53, 2.0
                 )
 
                 if response:
@@ -1744,6 +1744,7 @@ class MasterDnsVPNClient:
         is_fin=False,
         is_fin_ack=False,
         is_rst=False,
+        is_rst_ack=False,
         is_resend=False,
         is_socks_syn=False,
     ):
@@ -1763,6 +1764,9 @@ class MasterDnsVPNClient:
             effective_priority = 0
         elif is_fin_ack:
             ptype = Packet_Type.STREAM_FIN_ACK
+            effective_priority = 0
+        elif is_rst_ack:
+            ptype = Packet_Type.STREAM_RST_ACK
             effective_priority = 0
         elif is_rst:
             ptype = Packet_Type.STREAM_RST
@@ -1813,7 +1817,7 @@ class MasterDnsVPNClient:
         else:
             stream_data = self.active_streams.get(stream_id)
             if not stream_data:
-                if is_rst or is_fin_ack:
+                if is_rst or is_fin_ack or is_rst_ack:
                     heapq.heappush(self.main_queue, queue_item)
                     self.tx_event.set()
                 return
@@ -2079,6 +2083,9 @@ class MasterDnsVPNClient:
             if ptype == Packet_Type.STREAM_FIN:
                 await self._client_enqueue_tx(0, stream_id, sn, b"", is_fin_ack=True)
                 return
+            elif ptype == Packet_Type.STREAM_RST:
+                await self._client_enqueue_tx(0, stream_id, sn, b"", is_rst_ack=True)
+                return
             elif ptype in (
                 Packet_Type.STREAM_DATA,
                 Packet_Type.STREAM_RESEND,
@@ -2187,12 +2194,26 @@ class MasterDnsVPNClient:
                     await arq._try_finalize_remote_eof()
 
         elif ptype == Packet_Type.STREAM_RST and stream_id_exists:
+            self._send_ping_packet()
+            await self._client_enqueue_tx(0, stream_id, sn, b"", is_rst_ack=True)
+
             arq = self.active_streams[stream_id].get("stream")
             if arq:
                 arq._rst_received = True
+                arq._rst_seq_received = sn
+
             await self.close_stream(
-                stream_id, reason="Remote stream reset", abortive=True
+                stream_id,
+                reason="Remote stream reset",
+                abortive=True,
+                remote_reset=True,
             )
+        elif ptype == Packet_Type.STREAM_RST_ACK and stream_id_exists:
+            arq = self.active_streams[stream_id].get("stream")
+            if arq and getattr(arq, "_rst_seq_sent", None) == sn:
+                arq._rst_acked = True
+                self.active_streams[stream_id]["rst_retries"] = 99
+            self._send_ping_packet()
         elif ptype == Packet_Type.PACKED_CONTROL_BLOCKS and data:
             _unpack_from = struct.unpack_from
             for i in range(0, len(data), 5):
@@ -2224,7 +2245,11 @@ class MasterDnsVPNClient:
                 self.session_restart_event.set()
 
     async def close_stream(
-        self, stream_id: int, reason: str = "Unknown", abortive: bool = False
+        self,
+        stream_id: int,
+        reason: str = "Unknown",
+        abortive: bool = False,
+        remote_reset: bool = False,
     ) -> None:
         """Safely close a stream without sending FIN before snd_buf is drained."""
 
@@ -2273,7 +2298,10 @@ class MasterDnsVPNClient:
         if stream_obj:
             try:
                 if abortive:
-                    await stream_obj.abort(reason=reason)
+                    if remote_reset or getattr(stream_obj, "_rst_received", False):
+                        await stream_obj.close(reason=reason, send_fin=False)
+                    else:
+                        await stream_obj.abort(reason=reason)
                 elif not getattr(stream_obj, "closed", False):
                     await stream_obj.close(
                         reason=reason,
@@ -2329,15 +2357,48 @@ class MasterDnsVPNClient:
                         await self._client_enqueue_tx(0, sid, 0, syn_data)
 
                     elif status == "TIME_WAIT":
+                        stream_obj = s.get("stream")
+
                         if (now - close_time) > 45.0:
                             self.active_streams.pop(sid, None)
-                        elif (now - last_act) > 3.0 and s.get("fin_retries", 0) < 15:
+
+                        elif (
+                            stream_obj
+                            and getattr(stream_obj, "_rst_sent", False)
+                            and not getattr(stream_obj, "_rst_acked", False)
+                            and (now - last_act) > 1.5
+                            and s.get("rst_retries", 0) < 10
+                        ):
+                            s["last_activity_time"] = now
+                            s["rst_retries"] = s.get("rst_retries", 0) + 1
+
+                            rst_sn = getattr(stream_obj, "_rst_seq_sent", None)
+                            if rst_sn is not None:
+                                await self._client_enqueue_tx(
+                                    0,
+                                    sid,
+                                    rst_sn,
+                                    b"RST:" + os.urandom(4),
+                                    is_rst=True,
+                                )
+
+                        elif (
+                            not (stream_obj and getattr(stream_obj, "_rst_sent", False))
+                            and not (
+                                stream_obj
+                                and getattr(stream_obj, "_rst_received", False)
+                            )
+                            and not (
+                                stream_obj and getattr(stream_obj, "_fin_acked", False)
+                            )
+                            and (now - last_act) > 3.0
+                            and s.get("fin_retries", 0) < 15
+                        ):
                             s["last_activity_time"] = now
                             s["fin_retries"] = s.get("fin_retries", 0) + 1
                             fin_data = b"FIN:" + os.urandom(4)
 
                             fin_sn = 0
-                            stream_obj = s.get("stream")
                             if (
                                 stream_obj
                                 and getattr(stream_obj, "_fin_seq_sent", None)

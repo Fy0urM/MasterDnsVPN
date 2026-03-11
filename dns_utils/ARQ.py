@@ -64,6 +64,9 @@ class ARQ:
 
         self._rst_received = False
         self._rst_sent = False
+        self._rst_acked = False
+        self._rst_seq_sent = None
+        self._rst_seq_received = None
         self._close_time = None
 
         self._local_write_closed = False
@@ -345,6 +348,12 @@ class ARQ:
             if len(self.snd_buf) < self.limit:
                 self.window_not_full.set()
 
+    async def receive_rst_ack(self, sn):
+        self.last_activity = time.monotonic()
+
+        if self._rst_seq_sent is not None and sn == self._rst_seq_sent:
+            self._rst_acked = True
+
     async def check_retransmits(self):
         if self.closed:
             return
@@ -383,22 +392,25 @@ class ARQ:
             else:
                 await _enqueue(1, _sid, sn, data, is_resend=True)
 
-    async def abort(self, reason="Abort"):
+    async def abort(self, reason="Abort", send_rst=True):
         if self.closed:
             return
 
-        self._rst_sent = True
+        if send_rst and not self._rst_sent and not self._rst_received:
+            self._rst_sent = True
+            if self._rst_seq_sent is None:
+                self._rst_seq_sent = self.snd_nxt
 
-        try:
-            await self.enqueue_tx(
-                0,
-                self.stream_id,
-                self.snd_nxt,
-                b"",
-                is_rst=True,
-            )
-        except Exception:
-            pass
+            try:
+                await self.enqueue_tx(
+                    0,
+                    self.stream_id,
+                    self._rst_seq_sent,
+                    b"",
+                    is_rst=True,
+                )
+            except Exception:
+                pass
 
         await self.close(reason=reason, send_fin=False)
 
