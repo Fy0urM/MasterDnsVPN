@@ -1808,6 +1808,9 @@ class MasterDnsVPNClient(PacketQueueMixin):
         )
         self._send_ping_packet()
 
+    # ---------------------------------------------------------
+    # ARQ Enqueue Adapters
+    # ---------------------------------------------------------
     async def _client_enqueue_tx(
         self,
         priority,
@@ -1998,7 +2001,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
             if target_queue:
                 item = heapq.heappop(target_queue)
-                q_ptype, q_stream_id, q_sn = item[2], item[3], item[4]
+                q_ptype = item[2]
 
                 if is_main:
                     self._on_queue_pop(self.__dict__, item)

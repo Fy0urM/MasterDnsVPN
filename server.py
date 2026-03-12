@@ -834,7 +834,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self, session_id, stream_id, sn, labels, extracted_header, now_mono
     ):
         """Handle control request packets by replying with their ACK type."""
-        _ = labels
 
         ptype = extracted_header.get("packet_type") if extracted_header else None
         ack_ptype = self._control_request_ack_map.get(ptype)
@@ -855,7 +854,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self, session_id, stream_id, sn, labels, extracted_header, now_mono
     ):
         """Handle control ACK packets and notify stream ARQ tracker."""
-        _ = labels
         ptype = extracted_header.get("packet_type") if extracted_header else None
         if ptype is None:
             return
@@ -879,9 +877,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self, session_id, stream_id, sn, labels, extracted_header, now_mono
     ):
         """Handle PACKED_CONTROL_BLOCKS packets."""
-        _ = stream_id
-        _ = sn
-        _ = extracted_header
 
         session = self.sessions.get(session_id)
         if not session:
@@ -1656,6 +1651,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
         except Exception:
             pass
 
+    # ---------------------------------------------------------
+    # ARQ Enqueue Adapters
+    # ---------------------------------------------------------
     async def _arq_enqueue_tx(self, session_id, priority, stream_id, sn, data, **flags):
         """Data-plane enqueue adapter for ARQ (legacy flag API -> Packet_Type)."""
         ptype = self._resolve_arq_packet_type(**flags)
