@@ -542,18 +542,37 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	resolvedUpload := resolveCompressionType(requestedUpload, s.uploadCompressionMask)
 	resolvedDownload := resolveCompressionType(requestedDownload, s.downloadCompressionMask)
 
-	record, _, err := s.sessions.findOrCreate(
+	record, reused, err := s.sessions.findOrCreate(
 		vpnPacket.Payload,
 		resolvedUpload,
 		resolvedDownload,
 		s.cfg.MaxPacketsPerBatch,
 	)
 
-	if err != nil || record == nil {
+	if err != nil {
+		if err == ErrSessionTableFull && s.log != nil {
+			s.log.Errorf(
+				"🚫 <red>Session Table Full Request: <cyan>SESSION_INIT</cyan>, Domain: <cyan>%s</cyan></red>",
+				decision.RequestName,
+			)
+		}
+		return nil
+	}
+	if record == nil {
 		return nil
 	}
 
-	responsePayload := make([]byte, sessionAcceptSize)
+	if !reused && s.log != nil {
+		s.log.Infof(
+			"🤝 <green>Session Created, ID: <cyan>%d</cyan>, Mode: <cyan>%s</cyan>, Upload Compression: <cyan>%s</cyan>, Download Compression: <cyan>%s</cyan></green>",
+			record.ID,
+			sessionResponseModeName(record.ResponseMode),
+			compression.TypeName(record.UploadCompression),
+			compression.TypeName(record.DownloadCompression),
+		)
+	}
+
+	var responsePayload [sessionAcceptSize]byte
 	responsePayload[0] = record.ID
 	responsePayload[1] = record.Cookie
 	responsePayload[2] = compression.PackPair(record.UploadCompression, record.DownloadCompression)
@@ -562,7 +581,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	response, err := DnsParser.BuildVPNResponsePacket(questionPacket, decision.RequestName, VpnProto.Packet{
 		SessionID:  0,
 		PacketType: Enums.PACKET_SESSION_ACCEPT,
-		Payload:    responsePayload,
+		Payload:    responsePayload[:],
 	}, record.ResponseMode == mtuProbeModeBase64)
 
 	if err != nil {
@@ -570,6 +589,13 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	}
 
 	return response
+}
+
+func sessionResponseModeName(mode uint8) string {
+	if mode == mtuProbeModeBase64 {
+		return "BASE64"
+	}
+	return "RAW (Bytes)"
 }
 
 func buildCompressionMask(values []int) uint8 {

@@ -22,11 +22,12 @@ import (
 var ErrSessionTableFull = errors.New("session table full")
 
 const (
-	maxServerSessions   = 255
-	sessionInitTTL      = 10 * time.Minute
-	sessionInitDataSize = 10
-	minSessionMTU       = 30
-	maxSessionMTU       = 4096
+	maxServerSessionID    = 255
+	maxServerSessionSlots = 255
+	sessionInitTTL        = 10 * time.Minute
+	sessionInitDataSize   = 10
+	minSessionMTU         = 30
+	maxSessionMTU         = 4096
 )
 
 type sessionRecord struct {
@@ -104,7 +105,7 @@ type sessionStore struct {
 	nextReuseSweepUnixNano int64
 	cookieBytes            [32]byte
 	cookieIndex            int
-	byID                   [maxServerSessions]*sessionRecord
+	byID                   [maxServerSessionID + 1]*sessionRecord
 	bySig                  map[[sessionInitDataSize]byte]uint8
 	recentClosed           map[uint8]closedSessionRecord
 }
@@ -114,6 +115,7 @@ func newSessionStore() *sessionStore {
 		bySig:        make(map[[sessionInitDataSize]byte]uint8, 64),
 		recentClosed: make(map[uint8]closedSessionRecord, 32),
 		cookieIndex:  32,
+		nextID:       1,
 	}
 }
 
@@ -169,7 +171,7 @@ func (s *sessionStore) findOrCreate(payload []byte, uploadCompressionType uint8,
 	s.bySig[signature] = uint8(slot)
 	s.updateNextReuseSweepLocked(record.reuseUntilUnixNano)
 	delete(s.recentClosed, uint8(slot))
-	s.nextID = uint16((slot + 1) % maxServerSessions)
+	s.nextID = uint16(nextSessionID(uint8(slot)))
 	return record, false, nil
 }
 
@@ -334,7 +336,8 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 
 	expired := make([]uint8, 0, 8)
 	idleTimeoutNanos := idleTimeout.Nanoseconds()
-	for sessionID, record := range s.byID {
+	for sessionID := 1; sessionID <= maxServerSessionID; sessionID++ {
+		record := s.byID[sessionID]
 		if record == nil {
 			continue
 		}
@@ -362,17 +365,20 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 }
 
 func (s *sessionStore) allocateSlotLocked() int {
-	if s.activeCount >= maxServerSessions {
+	if s.activeCount >= maxServerSessionSlots {
 		return -1
 	}
 
 	start := int(s.nextID)
-	for slot := start; slot < maxServerSessions; slot++ {
+	if start < 1 || start > maxServerSessionID {
+		start = 1
+	}
+	for slot := start; slot <= maxServerSessionID; slot++ {
 		if s.byID[slot] == nil {
 			return slot
 		}
 	}
-	for slot := 0; slot < start; slot++ {
+	for slot := 1; slot < start; slot++ {
 		if s.byID[slot] == nil {
 			return slot
 		}
@@ -423,6 +429,13 @@ func (r *sessionRecord) setLastActivityUnixNano(nowUnixNano int64) {
 
 func (r *sessionRecord) lastActivity() int64 {
 	return atomic.LoadInt64(&r.lastActivityUnixNano)
+}
+
+func nextSessionID(current uint8) uint8 {
+	if current >= maxServerSessionID {
+		return 1
+	}
+	return current + 1
 }
 
 func (r *sessionRecord) runtimeView() sessionRuntimeView {
