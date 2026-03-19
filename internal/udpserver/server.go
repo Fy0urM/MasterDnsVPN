@@ -707,7 +707,46 @@ func (s *Server) handleStreamSynRequest(questionPacket []byte, decision domainma
 	if !ok {
 		return nil
 	}
-	s.streams.EnsureOpen(vpnPacket.SessionID, vpnPacket.StreamID, time.Now())
+	now := time.Now()
+	if VpnProto.IsTCPForwardSynPayload(vpnPacket.Payload) {
+		if s.cfg.ForwardIP == "" || s.cfg.ForwardPort <= 0 {
+			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+				PacketType:  Enums.PACKET_STREAM_RST,
+				StreamID:    vpnPacket.StreamID,
+				SequenceNum: vpnPacket.SequenceNum,
+			})
+		}
+		if existing, ok := s.streams.Lookup(vpnPacket.SessionID, vpnPacket.StreamID); ok && existing != nil && existing.Connected && existing.TargetHost == s.cfg.ForwardIP && existing.TargetPort == uint16(s.cfg.ForwardPort) {
+			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+				PacketType:     Enums.PACKET_STREAM_SYN_ACK,
+				StreamID:       vpnPacket.StreamID,
+				SequenceNum:    vpnPacket.SequenceNum,
+				FragmentID:     0,
+				TotalFragments: 0,
+			})
+		}
+		s.streams.EnsureOpen(vpnPacket.SessionID, vpnPacket.StreamID, now)
+		upstreamConn, err := s.dialSOCKSStreamTarget(s.cfg.ForwardIP, uint16(s.cfg.ForwardPort))
+		if err != nil {
+			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+				PacketType:  Enums.PACKET_STREAM_RST,
+				StreamID:    vpnPacket.StreamID,
+				SequenceNum: vpnPacket.SequenceNum,
+			})
+		}
+		record, ok := s.streams.AttachUpstream(vpnPacket.SessionID, vpnPacket.StreamID, s.cfg.ForwardIP, uint16(s.cfg.ForwardPort), upstreamConn, now)
+		if !ok || record == nil {
+			safeCloseConn(upstreamConn)
+			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
+				PacketType:  Enums.PACKET_STREAM_RST,
+				StreamID:    vpnPacket.StreamID,
+				SequenceNum: vpnPacket.SequenceNum,
+			})
+		}
+		s.startStreamUpstreamReadLoop(vpnPacket.SessionID, vpnPacket.StreamID, upstreamConn, sessionRecord.DownloadCompression, int(sessionRecord.DownloadMTU))
+	} else {
+		s.streams.EnsureOpen(vpnPacket.SessionID, vpnPacket.StreamID, now)
+	}
 	return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
 		PacketType:     Enums.PACKET_STREAM_SYN_ACK,
 		StreamID:       vpnPacket.StreamID,

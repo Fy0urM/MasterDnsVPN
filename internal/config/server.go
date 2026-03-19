@@ -46,6 +46,8 @@ type ServerConfig struct {
 	DNSFragmentAssemblyTimeoutSecs    float64  `toml:"DNS_FRAGMENT_ASSEMBLY_TIMEOUT"`
 	DNSCacheMaxRecords                int      `toml:"DNS_CACHE_MAX_RECORDS"`
 	DNSCacheTTLSeconds                float64  `toml:"DNS_CACHE_TTL_SECONDS"`
+	ForwardIP                         string   `toml:"FORWARD_IP"`
+	ForwardPort                       int      `toml:"FORWARD_PORT"`
 	Domain                            []string `toml:"DOMAIN"`
 	MinVPNLabelLength                 int      `toml:"MIN_VPN_LABEL_LENGTH"`
 	SupportedUploadCompressionTypes   []int    `toml:"SUPPORTED_UPLOAD_COMPRESSION_TYPES"`
@@ -85,6 +87,8 @@ func defaultServerConfig() ServerConfig {
 		DNSFragmentAssemblyTimeoutSecs:    16.0,
 		DNSCacheMaxRecords:                2000,
 		DNSCacheTTLSeconds:                3600.0,
+		ForwardIP:                         "",
+		ForwardPort:                       0,
 		Domain:                            nil,
 		MinVPNLabelLength:                 3,
 		SupportedUploadCompressionTypes:   []int{0, 3},
@@ -200,6 +204,9 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	}
 	if cfg.DNSCacheTTLSeconds <= 0 {
 		cfg.DNSCacheTTLSeconds = 3600.0
+	}
+	if cfg.ForwardPort < 0 || cfg.ForwardPort > 65535 {
+		return cfg, fmt.Errorf("invalid FORWARD_PORT: %d", cfg.ForwardPort)
 	}
 
 	if cfg.MinVPNLabelLength <= 0 {

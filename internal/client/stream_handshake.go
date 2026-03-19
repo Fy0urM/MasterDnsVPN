@@ -69,6 +69,34 @@ func (c *Client) OpenSOCKS5Stream(targetPayload []byte, timeout time.Duration) (
 	return 0, ErrStreamHandshakeFailed
 }
 
+func (c *Client) OpenTCPStream(timeout time.Duration) (uint16, error) {
+	if c == nil {
+		return 0, ErrStreamHandshakeFailed
+	}
+	if !c.SessionReady() {
+		return 0, ErrSessionInitFailed
+	}
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	streamID := c.nextStreamID()
+	synPacket, err := c.exchangeStreamControlPacket(
+		Enums.PACKET_STREAM_SYN,
+		streamID,
+		1,
+		VpnProto.TCPForwardSynPayload(),
+		timeout,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if synPacket.PacketType != Enums.PACKET_STREAM_SYN_ACK || synPacket.StreamID != streamID {
+		return 0, ErrStreamHandshakeFailed
+	}
+	return streamID, nil
+}
+
 func (c *Client) exchangeStreamControlPacket(packetType uint8, streamID uint16, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {
 	if c == nil {
 		return VpnProto.Packet{}, ErrStreamHandshakeFailed

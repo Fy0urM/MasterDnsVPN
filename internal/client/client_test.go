@@ -974,6 +974,63 @@ func TestOpenSOCKS5StreamReturnsServerError(t *testing.T) {
 	}
 }
 
+func TestOpenTCPStreamCompletesHandshake(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		ProtocolType:              "TCP",
+		LocalDNSPendingTimeoutSec: 1,
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.sessionReady = true
+	c.responseMode = mtuProbeRawResponse
+
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		queryPacket, err := DnsParser.ParsePacketLite(packet)
+		if err != nil || !queryPacket.HasQuestion {
+			t.Fatalf("unexpected tunnel query: err=%v", err)
+		}
+		vpnPacket, err := VpnProto.ParseFromLabels(extractTestTunnelLabels(queryPacket.FirstQuestion.Name, "v.example.com"), c.codec)
+		if err != nil {
+			t.Fatalf("ParseFromLabels returned error: %v", err)
+		}
+		if vpnPacket.PacketType != Enums.PACKET_STREAM_SYN || !VpnProto.IsTCPForwardSynPayload(vpnPacket.Payload) {
+			t.Fatalf("unexpected tcp syn packet: %+v", vpnPacket)
+		}
+		return DnsParser.BuildVPNResponsePacket(packet, queryPacket.FirstQuestion.Name, VpnProto.Packet{
+			SessionID:      c.sessionID,
+			SessionCookie:  c.sessionCookie,
+			PacketType:     Enums.PACKET_STREAM_SYN_ACK,
+			StreamID:       vpnPacket.StreamID,
+			SequenceNum:    vpnPacket.SequenceNum,
+			FragmentID:     0,
+			TotalFragments: 1,
+		}, false)
+	}
+
+	streamID, err := c.OpenTCPStream(time.Second)
+	if err != nil {
+		t.Fatalf("OpenTCPStream returned error: %v", err)
+	}
+	if streamID == 0 {
+		t.Fatal("expected non-zero stream id")
+	}
+}
+
 func TestPerformSOCKS5HandshakeParsesConnectRequest(t *testing.T) {
 	serverConn, clientConn := net.Pipe()
 	defer serverConn.Close()

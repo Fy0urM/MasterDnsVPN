@@ -232,6 +232,58 @@ func TestHandlePacketCreatesAndReusesSessionInit(t *testing.T) {
 	}
 }
 
+func TestHandleStreamSynConnectsForwardTargetForTCPMode(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+		ForwardIP:         "127.0.0.1",
+		ForwardPort:       8080,
+	}, nil, codec)
+
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+	srv.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
+		if network != "tcp" || address != "127.0.0.1:8080" {
+			t.Fatalf("unexpected dial target: network=%s address=%s", network, address)
+		}
+		return serverSide, nil
+	}
+
+	verifyCode := []byte{1, 2, 3, 4}
+	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3]}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+	query := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_SYN, 9, 1, VpnProto.TCPForwardSynPayload())
+	response := srv.handlePacket(query)
+	if len(response) == 0 {
+		t.Fatal("expected stream syn response")
+	}
+	vpnResponse, err := DnsParser.ExtractVPNResponse(response, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if vpnResponse.PacketType != Enums.PACKET_STREAM_SYN_ACK {
+		t.Fatalf("unexpected packet type: got=%d want=%d", vpnResponse.PacketType, Enums.PACKET_STREAM_SYN_ACK)
+	}
+	record, ok := srv.streams.Lookup(sessionID, 9)
+	if !ok || record == nil || !record.Connected || record.TargetHost != "127.0.0.1" || record.TargetPort != 8080 {
+		t.Fatalf("expected connected forward stream, got=%+v ok=%v", record, ok)
+	}
+}
+
 func TestHandlePacketRejectsMalformedSessionInit(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

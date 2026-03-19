@@ -58,6 +58,12 @@ func main() {
 		cfg.LocalSOCKS5Port,
 	)
 	log.Infof(
+		"🔌 <green>Local TCP Listener</green> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s:%d</cyan>",
+		cfg.ProtocolType,
+		cfg.ListenIP,
+		cfg.ListenPort,
+	)
+	log.Infof(
 		"🗂️ <green>Connection Catalog</green> <magenta>|</magenta> <magenta>%d</magenta> <blue>domain-resolver pairs</blue>",
 		len(app.Connections()),
 	)
@@ -89,14 +95,14 @@ func main() {
 	)
 	log.Infof("🎯 <green>Client Bootstrap Ready</green>")
 
-	if !cfg.LocalDNSEnabled && !cfg.LocalSOCKS5Enabled {
+	if !cfg.LocalDNSEnabled && !cfg.LocalSOCKS5Enabled && cfg.ProtocolType != "TCP" {
 		return
 	}
 
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	errCh := make(chan error, 2)
+	errCh := make(chan error, 3)
 	var listenersWG sync.WaitGroup
 
 	if cfg.LocalDNSEnabled {
@@ -119,6 +125,19 @@ func main() {
 			if err := app.RunLocalSOCKS5Listener(runCtx); err != nil {
 				select {
 				case errCh <- fmt.Errorf("local socks5 listener failed: %w", err):
+				default:
+				}
+				stop()
+			}
+		}()
+	}
+	if cfg.ProtocolType == "TCP" {
+		listenersWG.Add(1)
+		go func() {
+			defer listenersWG.Done()
+			if err := app.RunLocalTCPListener(runCtx); err != nil {
+				select {
+				case errCh <- fmt.Errorf("local tcp listener failed: %w", err):
 				default:
 				}
 				stop()
