@@ -111,7 +111,5 @@ func pruneAttemptTimes(values []int64, cutoff int64) []int64 {
 	if idx >= len(values) {
 		return values[:0]
 	}
-
-	copy(values, values[idx:])
-	return values[:len(values)-idx]
+	return values[idx:]
 }

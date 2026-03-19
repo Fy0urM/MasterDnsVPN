@@ -332,27 +332,51 @@ func popNextOutboundPacket(session *streamOutboundSession) (VpnProto.Packet, boo
 	}
 
 	bestPriority := 255
-	for _, packet := range session.queue {
+	selectedIdx := -1
+	lowestStreamID := uint16(0)
+	nextStreamID := uint16(0)
+	lowestIdx := -1
+	nextIdx := -1
+	hasLowest := false
+	hasNext := false
+	for idx, packet := range session.queue {
 		priority := outboundPacketPriority(packet.PacketType)
+		if priority > bestPriority {
+			continue
+		}
 		if priority < bestPriority {
 			bestPriority = priority
+			selectedIdx = idx
+			lowestStreamID = 0
+			nextStreamID = 0
+			lowestIdx = -1
+			nextIdx = -1
+			hasLowest = false
+			hasNext = false
 		}
-	}
-
-	targetStreamID, useRoundRobin := nextOutboundPriorityStream(session.queue, bestPriority, session.rrCursor)
-	selectedIdx := -1
-	for idx, packet := range session.queue {
-		if outboundPacketPriority(packet.PacketType) != bestPriority {
+		if packet.StreamID == 0 {
 			continue
 		}
-		if useRoundRobin && packet.StreamID != targetStreamID {
-			continue
+		if !hasLowest || packet.StreamID < lowestStreamID {
+			lowestStreamID = packet.StreamID
+			lowestIdx = idx
+			hasLowest = true
 		}
-		selectedIdx = idx
-		break
+		if packet.StreamID > session.rrCursor && (!hasNext || packet.StreamID < nextStreamID) {
+			nextStreamID = packet.StreamID
+			nextIdx = idx
+			hasNext = true
+		}
 	}
 	if selectedIdx < 0 {
 		return VpnProto.Packet{}, false
+	}
+	if hasNext {
+		selectedIdx = nextIdx
+		session.rrCursor = nextStreamID
+	} else if hasLowest {
+		selectedIdx = lowestIdx
+		session.rrCursor = lowestStreamID
 	}
 
 	packet := session.queue[selectedIdx]
@@ -360,39 +384,7 @@ func popNextOutboundPacket(session *streamOutboundSession) (VpnProto.Packet, boo
 	lastIdx := len(session.queue) - 1
 	session.queue[lastIdx] = VpnProto.Packet{}
 	session.queue = session.queue[:lastIdx]
-	if useRoundRobin {
-		session.rrCursor = targetStreamID
-	}
 	return packet, true
-}
-
-func nextOutboundPriorityStream(queue []VpnProto.Packet, priority int, cursor uint16) (uint16, bool) {
-	var lowest uint16
-	var next uint16
-	hasLowest := false
-	hasNext := false
-
-	for _, packet := range queue {
-		if outboundPacketPriority(packet.PacketType) != priority || packet.StreamID == 0 {
-			continue
-		}
-		if !hasLowest || packet.StreamID < lowest {
-			lowest = packet.StreamID
-			hasLowest = true
-		}
-		if packet.StreamID > cursor && (!hasNext || packet.StreamID < next) {
-			next = packet.StreamID
-			hasNext = true
-		}
-	}
-
-	if hasNext {
-		return next, true
-	}
-	if hasLowest {
-		return lowest, true
-	}
-	return 0, false
 }
 
 func outboundPacketPriority(packetType uint8) int {

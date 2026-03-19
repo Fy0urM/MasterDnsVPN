@@ -52,6 +52,10 @@ func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest
 	}
 
 	cacheKey := dnscache.BuildKey(metadata.Domain, metadata.QType, metadata.QClass)
+	recordTypeName := ""
+	if c.log != nil {
+		recordTypeName = Enums.DNSRecordTypeName(metadata.QType)
+	}
 	now := c.now()
 	if cached, ok := c.localDNSCache.GetReady(cacheKey, query, now); ok {
 		c.dnsInflight.Complete(cacheKey)
@@ -59,7 +63,7 @@ func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest
 			c.log.Infof(
 				"📦 <green>Local DNS Cache Hit</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
 				metadata.Domain,
-				Enums.DNSRecordTypeName(metadata.QType),
+				recordTypeName,
 			)
 		}
 		return cached, nil
@@ -92,12 +96,16 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 
 	now := c.now()
 	inflightEntry, leader := c.dnsInflight.Acquire(dispatch.CacheKey, now)
+	recordTypeName := ""
+	if c.log != nil {
+		recordTypeName = Enums.DNSRecordTypeName(dispatch.QType)
+	}
 	if !leader {
 		if c.log != nil {
 			c.log.Infof(
 				"🧩 <green>Local DNS Inflight Reused</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
 				dispatch.Domain,
-				Enums.DNSRecordTypeName(dispatch.QType),
+				recordTypeName,
 			)
 		}
 		if c.dnsInflight.Wait(inflightEntry, time.Duration(c.cfg.LocalDNSPendingTimeoutSec*float64(time.Second))) {
@@ -117,7 +125,7 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 		c.log.Infof(
 			"🚇 <green>Local DNS Redirected To Tunnel</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow>",
 			dispatch.Domain,
-			Enums.DNSRecordTypeName(dispatch.QType),
+			recordTypeName,
 		)
 	}
 
@@ -127,7 +135,7 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 			c.log.Infof(
 				"✅ <green>Local DNS Resolved</green> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow> <magenta>|</magenta> <blue>Path</blue>: <yellow>Tunnel</yellow>",
 				dispatch.Domain,
-				Enums.DNSRecordTypeName(dispatch.QType),
+				recordTypeName,
 			)
 		}
 		return tunnelResponse
@@ -136,7 +144,7 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 		c.log.Warnf(
 			"⚠️ <yellow>Local DNS Resolve Failed</yellow> <magenta>|</magenta> <blue>Domain</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Type</blue>: <yellow>%s</yellow> <magenta>|</magenta> <blue>Error</blue>: <red>%v</red>",
 			dispatch.Domain,
-			Enums.DNSRecordTypeName(dispatch.QType),
+			recordTypeName,
 			err,
 		)
 	}
