@@ -58,7 +58,7 @@ type Client struct {
 	exchangeQueryFn     func(Connection, []byte, time.Duration) ([]byte, error)
 	fragmentLimits      sync.Map
 	stream0Runtime      *stream0Runtime
-	streamsMu           sync.Mutex
+	streamsMu           sync.RWMutex
 	streams             map[uint16]*clientStream
 	streamTXWindow      int
 	streamTXQueueLimit  int
@@ -350,7 +350,7 @@ func (c *Client) BuildConnectionMap() {
 }
 
 func (c *Client) GetConnectionByKey(serverKey string) (Connection, bool) {
-	idx, ok := c.connectionsByKey[strings.TrimSpace(serverKey)]
+	idx, ok := c.connectionIndexByKey(serverKey)
 	if !ok || idx < 0 || idx >= len(c.connections) {
 		return Connection{}, false
 	}
@@ -359,14 +359,16 @@ func (c *Client) GetConnectionByKey(serverKey string) (Connection, bool) {
 
 func (c *Client) SetConnectionValidity(serverKey string, valid bool) bool {
 	key := strings.TrimSpace(serverKey)
-	idx, ok := c.connectionsByKey[key]
+	idx, ok := c.connectionIndexByKey(key)
 	if !ok || idx < 0 || idx >= len(c.connections) {
 		return false
+	}
+	if c.connections[idx].IsValid == valid {
+		return true
 	}
 	if !c.balancer.SetConnectionValidity(key, valid) {
 		return false
 	}
-	c.connections[idx].IsValid = valid
 	return true
 }
 
@@ -410,8 +412,8 @@ func (c *Client) getStream(streamID uint16) (*clientStream, bool) {
 	if c == nil || streamID == 0 {
 		return nil, false
 	}
-	c.streamsMu.Lock()
-	defer c.streamsMu.Unlock()
+	c.streamsMu.RLock()
+	defer c.streamsMu.RUnlock()
 	stream, ok := c.streams[streamID]
 	return stream, ok
 }
@@ -436,8 +438,8 @@ func (c *Client) activeStreamCount() int {
 	if c == nil {
 		return 0
 	}
-	c.streamsMu.Lock()
-	defer c.streamsMu.Unlock()
+	c.streamsMu.RLock()
+	defer c.streamsMu.RUnlock()
 	return len(c.streams)
 }
 
@@ -445,11 +447,19 @@ func (c *Client) connectionPtrByKey(serverKey string) *Connection {
 	if c == nil {
 		return nil
 	}
-	idx, ok := c.connectionsByKey[strings.TrimSpace(serverKey)]
+	idx, ok := c.connectionIndexByKey(serverKey)
 	if !ok || idx < 0 || idx >= len(c.connections) {
 		return nil
 	}
 	return &c.connections[idx]
+}
+
+func (c *Client) connectionIndexByKey(serverKey string) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	idx, ok := c.connectionsByKey[strings.TrimSpace(serverKey)]
+	return idx, ok
 }
 
 func (c *Client) startResolverHealthRuntime(ctx context.Context) {
