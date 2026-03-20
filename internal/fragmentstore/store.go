@@ -16,6 +16,7 @@ type Store[K comparable] struct {
 	mu        sync.Mutex
 	items     map[K]*entry
 	completed map[K]time.Time
+	lastPurge time.Time
 }
 
 type entry struct {
@@ -44,7 +45,10 @@ func (s *Store[K]) Collect(key K, payload []byte, fragmentID uint8, totalFragmen
 		s.mu.Lock()
 		defer s.mu.Unlock()
 
-		s.purgeLocked(now, retention)
+		if now.Sub(s.lastPurge) >= time.Second {
+			s.purgeLocked(now, retention)
+			s.lastPurge = now
+		}
 		if expiresAt, ok := s.completed[key]; ok && now.Before(expiresAt) {
 			return nil, false, true
 		}
@@ -60,7 +64,10 @@ func (s *Store[K]) Collect(key K, payload []byte, fragmentID uint8, totalFragmen
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.purgeLocked(now, retention)
+	if now.Sub(s.lastPurge) >= time.Second {
+		s.purgeLocked(now, retention)
+		s.lastPurge = now
+	}
 
 	if expiresAt, ok := s.completed[key]; ok && now.Before(expiresAt) {
 		return nil, false, true

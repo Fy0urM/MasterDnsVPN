@@ -37,9 +37,11 @@ func (c *Client) queueDNSDispatch(request *dnsDispatchRequest) {
 	if c == nil || request == nil || len(request.Query) == 0 || c.stream0Runtime == nil {
 		return
 	}
+
 	if !c.SessionReady() || !c.stream0Runtime.IsRunning() {
 		return
 	}
+
 	if err := c.stream0Runtime.QueueDNSRequest(request.Query); err != nil && c.log != nil {
 		c.log.Debugf(
 			"\U0001F9E9 <yellow>Local DNS Queue Failed: <cyan>%s</cyan> (Type: <cyan>%s</cyan>) | Error: <cyan>%v</cyan></yellow>",
@@ -51,31 +53,28 @@ func (c *Client) queueDNSDispatch(request *dnsDispatchRequest) {
 }
 
 func (c *Client) handleInboundDNSResponseFragment(packet VpnProto.Packet) error {
-	if c == nil || packet.PacketType != Enums.PACKET_DNS_QUERY_RES || !packet.HasSequenceNum {
+	if c == nil || c.dnsResponses == nil || packet.PacketType != Enums.PACKET_DNS_QUERY_RES || !packet.HasSequenceNum {
 		return nil
-	}
-
-	totalFragments := packet.TotalFragments
-	if totalFragments == 0 {
-		totalFragments = 1
 	}
 
 	if c.stream0Runtime != nil {
 		c.stream0Runtime.QueueMainPacket(arqQueuedDNSAck(packet))
 	}
 
-	assembled, ready, _ := c.dnsResponses.Collect(
+	now := c.now()
+	assembled, ready, completed := c.dnsResponses.Collect(
 		clientDNSFragmentKey{
 			sessionID:   packet.SessionID,
 			sequenceNum: packet.SequenceNum,
 		},
 		packet.Payload,
 		packet.FragmentID,
-		totalFragments,
-		c.now(),
-		c.localDNSFragmentTimeout(),
+		packet.TotalFragments,
+		now,
+		c.localDNSFragTTL,
 	)
-	if !ready {
+
+	if completed || !ready || len(assembled) == 0 {
 		return nil
 	}
 
@@ -84,17 +83,22 @@ func (c *Client) handleInboundDNSResponseFragment(packet VpnProto.Packet) error 
 		return nil
 	}
 
-	question := parsed.FirstQuestion
 	if shouldCacheTunnelDNSResponse(assembled) {
+		cacheKey := dnscache.BuildKey(
+			parsed.FirstQuestion.Name,
+			parsed.FirstQuestion.Type,
+			parsed.FirstQuestion.Class,
+		)
 		c.persistResolvedLocalDNSCacheEntry(
-			dnscache.BuildKey(question.Name, question.Type, question.Class),
-			question.Name,
-			question.Type,
-			question.Class,
+			cacheKey,
+			parsed.FirstQuestion.Name,
+			parsed.FirstQuestion.Type,
+			parsed.FirstQuestion.Class,
 			assembled,
-			c.now(),
+			now,
 		)
 	}
+
 	return nil
 }
 
