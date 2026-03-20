@@ -25,14 +25,14 @@ func newDNSResolveInflightManager(timeout time.Duration) *dnsResolveInflightMana
 	}
 }
 
-func (m *dnsResolveInflightManager) Acquire(cacheKey []byte, now time.Time) (*dnsResolveInflightEntry, bool) {
+func (m *dnsResolveInflightManager) Acquire(cacheKey string, now time.Time) (*dnsResolveInflightEntry, bool) {
 	if m == nil {
 		return nil, false
 	}
 	return m.inner.Acquire(cacheKey, now)
 }
 
-func (m *dnsResolveInflightManager) Resolve(cacheKey []byte, response []byte) {
+func (m *dnsResolveInflightManager) Resolve(cacheKey string, response []byte) {
 	if m == nil {
 		return
 	}

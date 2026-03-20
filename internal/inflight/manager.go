@@ -44,15 +44,14 @@ func New[T any](timeout time.Duration, fallback time.Duration, cloneValue func(T
 	}
 }
 
-func (m *Manager[T]) Acquire(cacheKey []byte, now time.Time) (*Entry[T], bool) {
-	if m == nil || len(cacheKey) == 0 {
+func (m *Manager[T]) Acquire(key string, now time.Time) (*Entry[T], bool) {
+	if m == nil || key == "" {
 		return nil, false
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	key := string(cacheKey)
 	if m.nextCleanupAt.IsZero() || !now.Before(m.nextCleanupAt) {
 		for existingKey, entry := range m.items {
 			if entry == nil || now.Sub(entry.createdAt) >= m.timeout {
@@ -74,19 +73,19 @@ func (m *Manager[T]) Acquire(cacheKey []byte, now time.Time) (*Entry[T], bool) {
 	return entry, true
 }
 
-func (m *Manager[T]) Begin(cacheKey []byte, now time.Time) bool {
-	_, leader := m.Acquire(cacheKey, now)
+func (m *Manager[T]) Begin(key string, now time.Time) bool {
+	_, leader := m.Acquire(key, now)
 	return leader
 }
 
-func (m *Manager[T]) Resolve(cacheKey []byte, value T, hasValue bool) {
-	if m == nil || len(cacheKey) == 0 {
+func (m *Manager[T]) Resolve(key string, value T, hasValue bool) {
+	if m == nil || key == "" {
 		return
 	}
 
 	m.mu.Lock()
-	entry := m.items[string(cacheKey)]
-	delete(m.items, string(cacheKey))
+	entry := m.items[key]
+	delete(m.items, key)
 	if entry != nil && hasValue {
 		entry.value = m.clone(value)
 		entry.hasValue = true

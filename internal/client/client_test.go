@@ -670,6 +670,7 @@ func TestHandleInboundDNSResponseFragmentFlushesPersistedCacheImmediately(t *tes
 	}); err != nil {
 		t.Fatalf("handleInboundDNSResponseFragment returned error: %v", err)
 	}
+	writer.flushLocalDNSCache()
 
 	reader := New(cfg, nil, nil)
 	reader.now = func() time.Time { return now.Add(time.Minute) }

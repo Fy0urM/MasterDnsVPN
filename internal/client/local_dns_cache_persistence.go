@@ -25,9 +25,6 @@ func (c *Client) persistResolvedLocalDNSCacheEntry(cacheKey string, domain strin
 	}
 
 	c.localDNSCache.SetReady(cacheKey, domain, qType, qClass, rawResponse, now)
-	if c.hasPersistableLocalDNSCache() {
-		c.flushLocalDNSCache()
-	}
 }
 
 func (c *Client) ensureLocalDNSCacheLoaded() {
