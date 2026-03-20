@@ -336,14 +336,13 @@ func writeLowerASCIILabel(dst *strings.Builder, label []byte) {
 		return
 	}
 
-	var lowerBuf [63]byte
-	copy(lowerBuf[:], label)
+	dst.Write(label[:upperIndex])
 	for i := upperIndex; i < len(label); i++ {
-		ch := lowerBuf[i]
+		ch := label[i]
 		if ch >= 'A' && ch <= 'Z' {
-			ch += 'a' - 'A'
+			dst.WriteByte(ch + ('a' - 'A'))
+		} else {
+			dst.WriteByte(ch)
 		}
-		lowerBuf[i] = ch
 	}
-	dst.Write(lowerBuf[:len(label)])
 }
