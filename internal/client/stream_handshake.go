@@ -30,17 +30,6 @@ const (
 	streamControlMaxPolls            = 24
 )
 
-func (c *Client) nextStreamID() uint16 {
-	if c == nil {
-		return 1
-	}
-	c.lastStreamID++
-	if c.lastStreamID == 0 {
-		c.lastStreamID = 1
-	}
-	return c.lastStreamID
-}
-
 func (c *Client) OpenSOCKS5Stream(targetPayload []byte, timeout time.Duration) (uint16, error) {
 	if c == nil {
 		return 0, ErrStreamHandshakeFailed

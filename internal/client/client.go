@@ -56,7 +56,8 @@ type Client struct {
 	downloadCompression       uint8
 	enqueueSeq                uint64
 	mainSequence              uint16
-	lastStreamID              uint16
+	last_stream_id            uint16
+	active_streams            map[uint16]*Stream_client
 	syncedUploadMTU           int
 	syncedDownloadMTU         int
 	syncedUploadChars         int
@@ -288,6 +289,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		),
 		localDNSFragTTL:                       time.Duration(cfg.LocalDNSFragmentTimeoutSec * float64(time.Second)),
 		streams:                               make(map[uint16]*clientStream, 16),
+		active_streams:                        make(map[uint16]*Stream_client, 16),
 		closedStreams:                         make(map[uint16]int64, 16),
 		closedStreamsQueue:                    make([]uint16, 0, 16),
 		mtuTestRetries:                        cfg.MTUTestRetries,
@@ -439,7 +441,7 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.StopAsyncRuntime()
 	c.enqueueSeq = 0
 	c.mainSequence = 0
-	c.lastStreamID = 0
+	c.last_stream_id = 0
 	c.sessionReady = false
 	c.sessionID = 0
 	if resetSessionCookie {
@@ -456,6 +458,7 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.closeAllStreams()
 	c.streamsMu.Lock()
 	c.streams = make(map[uint16]*clientStream, 16)
+	c.active_streams = make(map[uint16]*Stream_client, 16)
 	c.closedStreams = make(map[uint16]int64, 16)
 	c.closedStreamsQueue = make([]uint16, 0, 16)
 	c.streamsMu.Unlock()
@@ -722,6 +725,19 @@ func (c *Client) deleteStream(streamID uint16) {
 		})
 		_ = stream.Conn.Close()
 	}
+}
+
+func (c *Client) nextStreamID() uint16 {
+	if c == nil {
+		return 1
+	}
+
+	c.last_stream_id++
+	if c.last_stream_id == 0 {
+		c.last_stream_id = 1
+	}
+
+	return c.last_stream_id
 }
 
 func (c *Client) closeAllStreams() {
