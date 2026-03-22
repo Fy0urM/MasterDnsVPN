@@ -103,13 +103,3 @@ func (c *Client) connectionPtrByKey(key string) *Connection {
 	}
 	return nil
 }
-
-// SetConnectionValidity updates the validity status of a connection.
-func (c *Client) SetConnectionValidity(key string, isValid bool) bool {
-	conn := c.connectionPtrByKey(key)
-	if conn == nil {
-		return false
-	}
-	conn.IsValid = isValid
-	return true
-}

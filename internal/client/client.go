@@ -309,10 +309,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	return c
 }
 
-func (c *Client) Config() config.ClientConfig {
-	return c.cfg
-}
-
 func (c *Client) Logger() *logger.Logger {
 	return c.log
 }
@@ -504,10 +500,5 @@ func (c *Client) HandleSessionBusy() error {
 
 func (c *Client) HandleMTUResponse(packet VpnProto.Packet) error {
 	// TODO: Implementing MTU response logic
-	return nil
-}
-
-func (c *Client) HandleServerDrop(packet VpnProto.Packet) error {
-	// TODO: Implementing server drop logic
 	return nil
 }
