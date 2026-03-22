@@ -196,11 +196,11 @@ func (s *Server) Run(ctx context.Context) error {
 	defer conn.Close()
 
 	if err := conn.SetReadBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("Ã¢Å¡Â Ã¯Â¸Â <yellow>UDP Read Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
+		s.log.Warnf("\U0001F4E1 <yellow>UDP Read Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
 	}
 
 	if err := conn.SetWriteBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("Ã¢Å¡Â Ã¯Â¸Â <yellow>UDP Write Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
+		s.log.Warnf("\U0001F4E1 <yellow>UDP Write Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
 	}
 
 	s.log.Infof(
@@ -784,10 +784,10 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 
 	// 1. Try MainQueue (Stream 0) first (Higher overall priority)
 	if item, _, ok := record.MainQueue.Pop(txPacketKeyExtractor); ok {
-		pkt := vpnPacketFromTX(item)
-		if isPackableControlPacket(pkt) && record.MaxPackedBlocks > 1 {
-			return s.packControlBlocks(record, pkt), true
+		if VpnProto.IsPackableControlPacket(item.PacketType, len(item.Payload)) && record.MaxPackedBlocks > 1 {
+			return s.packControlBlocks(record, item, 0), true
 		}
+		pkt := vpnPacketFromTX(item, 0)
 		return &pkt, true
 	}
 
@@ -818,10 +818,10 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 
 		if item, _, ok := stream.TXQueue.Pop(txPacketKeyExtractor); ok {
 			record.RRStreamID = streamID
-			pkt := vpnPacketFromTX(item)
-			if isPackableControlPacket(pkt) && record.MaxPackedBlocks > 1 {
-				return s.packControlBlocks(record, pkt), true
+			if VpnProto.IsPackableControlPacket(item.PacketType, len(item.Payload)) && record.MaxPackedBlocks > 1 {
+				return s.packControlBlocks(record, item, streamID), true
 			}
+			pkt := vpnPacketFromTX(item, streamID)
 			return &pkt, true
 		}
 	}
@@ -829,52 +829,75 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	return nil, false
 }
 
-func (s *Server) packControlBlocks(record *sessionRecord, first VpnProto.Packet) *VpnProto.Packet {
-	// Replicates Python's _pack_selected_response_blocks
+func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXPacket, initialStreamID uint16) *VpnProto.Packet {
 	limit := record.MaxPackedBlocks
 	if limit <= 1 {
-		return &first
+		pkt := vpnPacketFromTX(first, initialStreamID)
+		return &pkt
 	}
 
-	payload := make([]byte, 0, limit*PackedControlBlockSize)
-	payload = appendPackedControlBlock(payload, first)
-	// count := 1
+	payload := make([]byte, 0, limit*VpnProto.PackedControlBlockSize)
+	payload = VpnProto.AppendPackedControlBlock(payload, first.PacketType, initialStreamID, first.SequenceNum, 0, 0)
+	blocks := 1
 
-	// For now, only pack the first one to avoid complexity in this step
-	// Real implementation would loop here to dequeue more compatible blocks
+	// Cross-stream packing (Any priority)
+	// Start with the initial stream first to grab more blocks from it
+	streamIDs := make([]uint16, 0, len(record.ActiveStreams))
+	streamIDs = append(streamIDs, initialStreamID)
+	for _, sid := range record.ActiveStreams {
+		if sid != initialStreamID {
+			streamIDs = append(streamIDs, sid)
+		}
+	}
 
-	first.PacketType = Enums.PACKET_PACKED_CONTROL_BLOCKS
-	first.Payload = payload
-	return &first
+	for _, streamID := range streamIDs {
+		if blocks >= limit {
+			break
+		}
+		stream := record.Streams[streamID]
+		if stream == nil {
+			continue
+		}
+
+		for blocks < limit {
+			popped, ok := stream.TXQueue.PopAnyIf(func(p *serverStreamTXPacket) bool {
+				return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
+			}, txPacketKeyExtractor)
+
+			if !ok {
+				break
+			}
+
+			payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, streamID, popped.SequenceNum, 0, 0)
+			blocks++
+		}
+	}
+
+	if blocks <= 1 {
+		pkt := vpnPacketFromTX(first, initialStreamID)
+		return &pkt
+	}
+
+	return &VpnProto.Packet{
+		PacketType:  Enums.PACKET_PACKED_CONTROL_BLOCKS,
+		Payload:     payload,
+		StreamID:    0,
+		HasStreamID: true,
+	}
 }
 
 func txPacketKeyExtractor(p *serverStreamTXPacket) uint32 {
 	return getTrackingKey(p.PacketType, p.SequenceNum, p.FragmentID)
 }
 
-func vpnPacketFromTX(p *serverStreamTXPacket) VpnProto.Packet {
+func vpnPacketFromTX(p *serverStreamTXPacket, streamID uint16) VpnProto.Packet {
 	return VpnProto.Packet{
 		PacketType:     p.PacketType,
+		StreamID:       streamID,
 		SequenceNum:    p.SequenceNum,
 		Payload:        p.Payload,
 		HasSequenceNum: p.SequenceNum != 0,
-		HasStreamID:    true, // In server, we mostly send with streamID
-	}
-}
-
-func isPackableControlPacket(p VpnProto.Packet) bool {
-	if len(p.Payload) != 0 {
-		return false
-	}
-	switch p.PacketType {
-	case Enums.PACKET_STREAM_DATA_ACK,
-		Enums.PACKET_STREAM_SYN_ACK,
-		Enums.PACKET_STREAM_FIN_ACK,
-		Enums.PACKET_STREAM_RST_ACK,
-		Enums.PACKET_SOCKS5_SYN_ACK:
-		return true
-	default:
-		return false
+		HasStreamID:    true,
 	}
 }
 
@@ -887,22 +910,6 @@ func (s *Server) QueueTargetForPacket(streamExists bool, packetType uint8, strea
 	}
 	// Fallback to Main if stream recently closed
 	return QueueTargetMain, true
-}
-
-func ForEachPackedControlBlock(payload []byte, yield func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool) {
-	if len(payload) < PackedControlBlockSize || yield == nil {
-		return
-	}
-	for offset := 0; offset+PackedControlBlockSize <= len(payload); offset += PackedControlBlockSize {
-		packetType := payload[offset]
-		streamID := uint16(payload[offset+1])<<8 | uint16(payload[offset+2])
-		sequenceNum := uint16(payload[offset+3])<<8 | uint16(payload[offset+4])
-		fragmentID := payload[offset+5]
-		totalFragments := payload[offset+6]
-		if !yield(packetType, streamID, sequenceNum, fragmentID, totalFragments) {
-			break
-		}
-	}
 }
 
 func (s *Server) nextPongPayload() [7]byte {
@@ -1015,7 +1022,6 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	if record == nil {
 		return nil
 	}
-	// s.streamOutbound.ConfigureSession(...)
 
 	if !reused && s.log != nil {
 		s.log.Infof(
@@ -1205,12 +1211,12 @@ func (s *Server) handlePingRequest(_ VpnProto.Packet, sessionRecord *sessionRunt
 }
 
 func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
-	if sessionRecord == nil || len(vpnPacket.Payload) < PackedControlBlockSize {
+	if sessionRecord == nil || len(vpnPacket.Payload) < VpnProto.PackedControlBlockSize {
 		return false
 	}
 
 	handled := false
-	ForEachPackedControlBlock(vpnPacket.Payload, func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool {
+	VpnProto.ForEachPackedControlBlock(vpnPacket.Payload, func(packetType uint8, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8) bool {
 		if packetType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
 			return true
 		}
@@ -1907,14 +1913,4 @@ func (s *Server) expireStalledOutboundStreams(sessionID uint8, now time.Time) {
 	// Refactored: STALLED streams are now handled by ARQ's inactivityTimeout and maxRetries internally.
 	// This function remains to support legacy cleanup if needed, but primary logic is moved to ARQ.
 	return
-}
-
-func appendPackedControlBlock(dst []byte, p VpnProto.Packet) []byte {
-	return append(dst,
-		p.PacketType,
-		byte(p.StreamID>>8), byte(p.StreamID),
-		byte(p.SequenceNum>>8), byte(p.SequenceNum),
-		p.FragmentID,
-		p.TotalFragments,
-	)
 }

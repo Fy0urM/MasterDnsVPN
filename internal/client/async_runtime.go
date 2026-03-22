@@ -36,7 +36,7 @@ type asyncReadPacket struct {
 // It ensures the UDP socket is closed and all goroutines exit.
 func (c *Client) StopAsyncRuntime() {
 	if c.asyncCancel != nil {
-		c.log.Debugf("\U0001F6D1 <yellow>Stopping High-Performance Async Runtime...</yellow>")
+		c.log.Debugf("\U0001F6D1 <yellow>Stopping Async Runtime...</yellow>")
 		c.asyncCancel()
 		c.asyncWG.Wait()
 		c.asyncCancel = nil

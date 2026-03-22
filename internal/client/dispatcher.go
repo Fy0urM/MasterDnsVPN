@@ -16,42 +16,6 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
-const PackedControlBlockSize = 7
-
-func isPackableControlPacket(packetType uint8) bool {
-	switch packetType {
-	case Enums.PACKET_DNS_QUERY_RES_ACK, Enums.PACKET_STREAM_SYN, Enums.PACKET_STREAM_SYN_ACK,
-		Enums.PACKET_STREAM_FIN, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST,
-		Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_SOCKS5_SYN_ACK, Enums.PACKET_SOCKS5_CONNECT_FAIL,
-		Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK, Enums.PACKET_SOCKS5_RULESET_DENIED,
-		Enums.PACKET_SOCKS5_RULESET_DENIED_ACK, Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE,
-		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK, Enums.PACKET_SOCKS5_HOST_UNREACHABLE,
-		Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK, Enums.PACKET_SOCKS5_CONNECTION_REFUSED,
-		Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK, Enums.PACKET_SOCKS5_TTL_EXPIRED,
-		Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK, Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED,
-		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK, Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED,
-		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK, Enums.PACKET_SOCKS5_AUTH_FAILED,
-		Enums.PACKET_SOCKS5_AUTH_FAILED_ACK, Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
-		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK:
-		return true
-	default:
-		return false
-	}
-}
-
-func appendPackedControlBlockFromClient(dst []byte, p *clientStreamTXPacket, streamID uint16) []byte {
-	return append(
-		dst,
-		p.PacketType,
-		byte(streamID>>8),
-		byte(streamID),
-		byte(p.SequenceNum>>8),
-		byte(p.SequenceNum),
-		0, 0, // Fragment ID and Total Fragments (always 0 for control blocks from client streams)
-	)
-}
-
-// selectTargetConnections determines how many redundant packets should be sent and which connections to use.
 func (c *Client) selectTargetConnections(packetType uint8, streamID uint16) []Connection {
 	targetCount := c.cfg.PacketDuplicationCount
 	if targetCount < 1 {
@@ -169,7 +133,7 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 
 		rrCursor = selected.StreamID + 1
 
-		item, prio, ok := selected.PopNextTXPacket()
+		item, _, ok := selected.PopNextTXPacket()
 		if !ok || item == nil {
 			continue
 		}
@@ -181,25 +145,25 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 			maxBlocks = 1
 		}
 
-		if isPackableControlPacket(item.PacketType) && maxBlocks > 1 {
-			payload := make([]byte, 0, maxBlocks*PackedControlBlockSize)
-			payload = appendPackedControlBlockFromClient(payload, item, selected.StreamID)
+		if VpnProto.IsPackableControlPacket(item.PacketType, len(item.Payload)) && maxBlocks > 1 {
+			payload := make([]byte, 0, maxBlocks*VpnProto.PackedControlBlockSize)
+			payload = VpnProto.AppendPackedControlBlock(payload, item.PacketType, selected.StreamID, item.SequenceNum, item.FragmentID, item.TotalFragments)
 			blocks := 1
 
-			// Pop more from current stream if possible
+			// Pop more from current stream if possible (Any priority)
 			for blocks < maxBlocks {
-				popped, poppedOk := selected.txQueue.PopIf(prio, func(p *clientStreamTXPacket) bool {
-					return isPackableControlPacket(p.PacketType)
+				popped, poppedOk := selected.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
+					return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 				}, nil)
 				if !poppedOk {
 					break
 				}
-				payload = appendPackedControlBlockFromClient(payload, popped, selected.StreamID)
+				payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, selected.StreamID, popped.SequenceNum, popped.FragmentID, popped.TotalFragments)
 				blocks++
 				selected.ReleaseTXPacket(popped)
 			}
 
-			// Pop from other streams to fill block if space remains
+			// Pop from other streams to fill block if space remains (Any priority)
 			if blocks < maxBlocks {
 				for _, sid := range ids {
 					if blocks >= maxBlocks {
@@ -217,13 +181,13 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 						continue
 					}
 					for blocks < maxBlocks {
-						popped, poppedOk := otherStream.txQueue.PopIf(prio, func(p *clientStreamTXPacket) bool {
-							return isPackableControlPacket(p.PacketType)
+						popped, poppedOk := otherStream.txQueue.PopAnyIf(func(p *clientStreamTXPacket) bool {
+							return VpnProto.IsPackableControlPacket(p.PacketType, len(p.Payload))
 						}, nil)
 						if !poppedOk {
 							break
 						}
-						payload = appendPackedControlBlockFromClient(payload, popped, sid)
+						payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, sid, popped.SequenceNum, popped.FragmentID, popped.TotalFragments)
 						blocks++
 						otherStream.ReleaseTXPacket(popped)
 					}

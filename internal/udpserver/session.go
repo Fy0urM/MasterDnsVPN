@@ -19,6 +19,7 @@ import (
 	"masterdnsvpn-go/internal/arq"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/mlq"
+	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 var ErrSessionTableFull = errors.New("session table full")
@@ -30,7 +31,6 @@ const (
 	sessionInitDataSize   = 10
 	minSessionMTU         = 30
 	maxSessionMTU         = 4096
-	PackedControlBlockSize = 7
 )
 
 type QueueTarget uint8
@@ -76,7 +76,7 @@ type serverStreamTXPacket struct {
 	FragmentID     uint8
 	TotalFragments uint8
 	Payload        []byte
-	CreatedAt   time.Time
+	CreatedAt      time.Time
 }
 
 var txPacketPool = sync.Pool{
@@ -536,20 +536,8 @@ func (r *sessionRecord) applyMTUFromSessionInit(uploadMTU uint16, downloadMTU ui
 	r.UploadMTU = clampMTU(uploadMTU)
 	r.DownloadMTU = clampMTU(downloadMTU)
 	r.DownloadMTUBytes = int(r.DownloadMTU)
-	r.MaxPackedBlocks = computeServerPackedControlBlockLimit(r.DownloadMTUBytes, maxPacketsPerBatch)
+	r.MaxPackedBlocks = VpnProto.CalculateMaxPackedBlocks(r.DownloadMTUBytes, 80, 0)
 	r.StreamReadBufferSize = computeStreamReadBufferSize(r.DownloadMTUBytes)
-}
-
-func computeServerPackedControlBlockLimit(mtu int, maxPacketsPerBatch int) int {
-	// 7 bytes per packed control block
-	limit := (mtu - 100) / PackedControlBlockSize // Some overhead for headers
-	if limit < 1 {
-		limit = 1
-	}
-	if limit > maxPacketsPerBatch {
-		limit = maxPacketsPerBatch
-	}
-	return limit
 }
 
 func (r *sessionRecord) runtimeView() sessionRuntimeView {

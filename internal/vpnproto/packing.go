@@ -1,0 +1,78 @@
+// ==============================================================================
+// MasterDnsVPN
+// Author: MasterkinG32
+// Github: https://github.com/masterking32
+// Year: 2026
+// ==============================================================================
+
+package vpnproto
+
+import (
+	Enums "masterdnsvpn-go/internal/enums"
+)
+
+// PackedControlBlockSize is the fixed size of each block inside a PACKET_PACKED_CONTROL_BLOCKS (Type 14)
+// Structure: Type(1) + StreamID(2) + SeqNum(2) + FragID(1) + Total(1) = 7 Bytes
+const PackedControlBlockSize = 7
+
+// IsPackableControlPacket returns true if a packet type is eligible for packing.
+// Only control packets without payload should be packed.
+func IsPackableControlPacket(packetType uint8, payloadLen int) bool {
+	if payloadLen != 0 {
+		return false
+	}
+
+	switch packetType {
+	case Enums.PACKET_STREAM_DATA_ACK,
+		Enums.PACKET_STREAM_SYN_ACK,
+		Enums.PACKET_STREAM_FIN_ACK,
+		Enums.PACKET_STREAM_RST_ACK,
+		Enums.PACKET_SOCKS5_SYN_ACK,
+		Enums.PACKET_SOCKS5_CONNECTED_ACK,
+		Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK,
+		Enums.PACKET_SOCKS5_RULESET_DENIED_ACK,
+		Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
+		Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
+		Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK,
+		Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
+		Enums.PACKET_SOCKS5_AUTH_FAILED_ACK,
+		Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+		Enums.PACKET_DNS_QUERY_REQ_ACK,
+		Enums.PACKET_DNS_QUERY_RES_ACK:
+		return true
+	default:
+		return false
+	}
+}
+
+// AppendPackedControlBlock serializes a control packet metadata into a 7-byte block and appends it to dst.
+func AppendPackedControlBlock(dst []byte, ptype uint8, streamID uint16, sn uint16, fragID uint8, total uint8) []byte {
+	return append(dst,
+		ptype,
+		uint8(streamID>>8), uint8(streamID),
+		uint8(sn>>8), uint8(sn),
+		fragID,
+		total,
+	)
+}
+
+// ForEachPackedControlBlock iterates over a Type 14 payload and invokes yield for each block.
+func ForEachPackedControlBlock(payload []byte, yield func(ptype uint8, streamID uint16, sn uint16, fragID uint8, total uint8) bool) {
+	if payload == nil || yield == nil {
+		return
+	}
+
+	for offset := 0; offset+PackedControlBlockSize <= len(payload); offset += PackedControlBlockSize {
+		ptype := payload[offset]
+		streamID := uint16(payload[offset+1])<<8 | uint16(payload[offset+2])
+		sn := uint16(payload[offset+3])<<8 | uint16(payload[offset+4])
+		fragID := payload[offset+5]
+		total := payload[offset+6]
+
+		if !yield(ptype, streamID, sn, fragID, total) {
+			break
+		}
+	}
+}

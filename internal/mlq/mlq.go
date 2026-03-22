@@ -201,3 +201,47 @@ func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtr
 	}
 	return item, true
 }
+
+// PopAnyIf retrieves the highest priority item that matches the given predicate, regardless of its priority.
+func (m *MultiLevelQueue[T]) PopAnyIf(predicate func(T) bool, keyExtractor func(T) uint32) (T, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var zero T
+	if m.bitmask == 0 {
+		return zero, false
+	}
+
+	// Iterate through all priorities from highest to lowest
+	tempMask := m.bitmask
+	for tempMask != 0 {
+		priority := bits.TrailingZeros16(tempMask)
+		q := &m.queues[priority]
+
+		if len(q.Items) > 0 {
+			// Search in this priority queue for an item matching the predicate
+			for i, item := range q.Items {
+				if predicate == nil || predicate(item) {
+					// Found a match!
+					q.Items[i] = zero // Memory safety
+
+					// Remove from slice
+					q.Items = append(q.Items[:i], q.Items[i+1:]...)
+
+					if keyExtractor != nil {
+						delete(m.census, keyExtractor(item))
+					}
+					if len(q.Items) == 0 {
+						m.bitmask &= ^(1 << uint(priority))
+					}
+					return item, true
+				}
+			}
+		}
+
+		// Clear bit and check next priority
+		tempMask &= ^(1 << uint(priority))
+	}
+
+	return zero, false
+}
