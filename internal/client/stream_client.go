@@ -135,19 +135,19 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 
 	arqCfg := arq.Config{
 		WindowSize:               c.cfg.ARQWindowSize,
-		RTO:                      0.5,
-		MaxRTO:                   2.0,
+		RTO:                      c.cfg.ARQInitialRTOSeconds,
+		MaxRTO:                   c.cfg.ARQMaxRTOSeconds,
 		StartPaused:              conn != nil && streamID != 0 && c.cfg.ProtocolType == "SOCKS5",
 		EnableControlReliability: true,
-		ControlRTO:               0.5,
-		ControlMaxRTO:            2.0,
-		ControlMaxRetries:        40,
-		InactivityTimeout:        1200.0,
-		DataPacketTTL:            600.0,
-		MaxDataRetries:           400,
-		ControlPacketTTL:         600.0,
-		TerminalDrainTimeout:     60.0,
-		TerminalAckWaitTimeout:   30.0,
+		ControlRTO:               c.cfg.ARQControlInitialRTOSeconds,
+		ControlMaxRTO:            c.cfg.ARQControlMaxRTOSeconds,
+		ControlMaxRetries:        c.cfg.ARQMaxControlRetries,
+		InactivityTimeout:        c.cfg.ARQInactivityTimeoutSeconds,
+		DataPacketTTL:            c.cfg.ARQDataPacketTTLSeconds,
+		MaxDataRetries:           c.cfg.ARQMaxDataRetries,
+		ControlPacketTTL:         c.cfg.ARQControlPacketTTLSeconds,
+		TerminalDrainTimeout:     c.cfg.ARQTerminalDrainTimeoutSec,
+		TerminalAckWaitTimeout:   c.cfg.ARQTerminalAckWaitTimeoutSec,
 		CompressionType:          c.uploadCompression,
 	}
 
@@ -423,19 +423,19 @@ func (c *Client) InitVirtualStream0() {
 
 	arqCfg := arq.Config{
 		WindowSize:               c.cfg.ARQWindowSize,
-		RTO:                      0.5,
-		MaxRTO:                   2.0,
+		RTO:                      c.cfg.ARQInitialRTOSeconds,
+		MaxRTO:                   c.cfg.ARQMaxRTOSeconds,
 		IsVirtual:                true, // Bypasses internal timeout closures
 		EnableControlReliability: true,
-		ControlRTO:               0.5,
-		ControlMaxRTO:            2.0,
-		ControlMaxRetries:        40,
+		ControlRTO:               c.cfg.ARQControlInitialRTOSeconds,
+		ControlMaxRTO:            c.cfg.ARQControlMaxRTOSeconds,
+		ControlMaxRetries:        c.cfg.ARQMaxControlRetries,
 		InactivityTimeout:        999999.0, // Infinite
 		DataPacketTTL:            999999.0,
 		MaxDataRetries:           99999,
 		ControlPacketTTL:         999999.0,
-		TerminalDrainTimeout:     60.0,
-		TerminalAckWaitTimeout:   30.0,
+		TerminalDrainTimeout:     c.cfg.ARQTerminalDrainTimeoutSec,
+		TerminalAckWaitTimeout:   c.cfg.ARQTerminalAckWaitTimeoutSec,
 		CompressionType:          c.uploadCompression,
 	}
 

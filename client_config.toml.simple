@@ -90,6 +90,20 @@ COMPRESSION_MIN_SIZE = 100
 # Larger values increase throughput on high-latency links but use more memory.
 ARQ_WINDOW_SIZE = 2000
 
+# ARQ timing and retry controls.
+# These defaults are tuned to be more tolerant of delay and packet loss.
+ARQ_INITIAL_RTO_SECONDS = 1.0
+ARQ_MAX_RTO_SECONDS = 8.0
+ARQ_CONTROL_INITIAL_RTO_SECONDS = 1.0
+ARQ_CONTROL_MAX_RTO_SECONDS = 8.0
+ARQ_MAX_CONTROL_RETRIES = 80
+ARQ_INACTIVITY_TIMEOUT_SECONDS = 1800.0
+ARQ_DATA_PACKET_TTL_SECONDS = 1800.0
+ARQ_CONTROL_PACKET_TTL_SECONDS = 900.0
+ARQ_MAX_DATA_RETRIES = 800
+ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 90.0
+ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 60.0
+
 # Hard cap for how many small control packets may be packed into one block.
 # 1 = no packing. 5 is a good default for high-MTU links.
 MAX_PACKETS_PER_BATCH = 5

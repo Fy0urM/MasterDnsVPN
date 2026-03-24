@@ -157,6 +157,12 @@ ENCRYPTION_KEY = "secret"
 	if cfg.LocalDNSCacheMaxRecords != 2000 {
 		t.Fatalf("unexpected local dns records default: got=%d want=%d", cfg.LocalDNSCacheMaxRecords, 2000)
 	}
+	if cfg.ARQInitialRTOSeconds != 1.0 || cfg.ARQMaxRTOSeconds != 8.0 {
+		t.Fatalf("unexpected arq rto defaults: initial=%v max=%v", cfg.ARQInitialRTOSeconds, cfg.ARQMaxRTOSeconds)
+	}
+	if cfg.ARQMaxControlRetries != 80 || cfg.ARQMaxDataRetries != 800 {
+		t.Fatalf("unexpected arq retry defaults: control=%d data=%d", cfg.ARQMaxControlRetries, cfg.ARQMaxDataRetries)
+	}
 	if cfg.CompressionMinSize != compression.DefaultMinSize {
 		t.Fatalf("unexpected compression min size default: got=%d want=%d", cfg.CompressionMinSize, compression.DefaultMinSize)
 	}

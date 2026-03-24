@@ -87,7 +87,6 @@ type Server struct {
 	lastDropLogUnix          atomic.Int64
 	pongNonce                atomic.Uint32
 	invalidDropMode          atomic.Uint32
-	arqWindowSize            int
 }
 
 type request struct {
@@ -121,7 +120,6 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	}
 	return &Server{
 		cfg:                  cfg,
-		arqWindowSize:        cfg.ARQWindowSize,
 		log:                  log,
 		codec:                codec,
 		domainMatcher:        domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
@@ -842,19 +840,19 @@ func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) boo
 func (s *Server) streamARQConfig(isSocks bool, compressionType uint8) arq.Config {
 	return arq.Config{
 		WindowSize:               s.cfg.ARQWindowSize,
-		RTO:                      0.5,
-		MaxRTO:                   2.0,
+		RTO:                      s.cfg.ARQInitialRTOSeconds,
+		MaxRTO:                   s.cfg.ARQMaxRTOSeconds,
 		StartPaused:              isSocks,
 		EnableControlReliability: true,
-		ControlRTO:               0.5,
-		ControlMaxRTO:            2.0,
-		ControlMaxRetries:        40,
-		InactivityTimeout:        1200.0,
-		DataPacketTTL:            600.0,
-		MaxDataRetries:           400,
-		ControlPacketTTL:         600.0,
-		TerminalDrainTimeout:     60.0,
-		TerminalAckWaitTimeout:   30.0,
+		ControlRTO:               s.cfg.ARQControlInitialRTOSeconds,
+		ControlMaxRTO:            s.cfg.ARQControlMaxRTOSeconds,
+		ControlMaxRetries:        s.cfg.ARQMaxControlRetries,
+		InactivityTimeout:        s.cfg.ARQInactivityTimeoutSeconds,
+		DataPacketTTL:            s.cfg.ARQDataPacketTTLSeconds,
+		MaxDataRetries:           s.cfg.ARQMaxDataRetries,
+		ControlPacketTTL:         s.cfg.ARQControlPacketTTLSeconds,
+		TerminalDrainTimeout:     s.cfg.ARQTerminalDrainTimeoutSec,
+		TerminalAckWaitTimeout:   s.cfg.ARQTerminalAckWaitTimeoutSec,
 		CompressionType:          compressionType,
 	}
 }

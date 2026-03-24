@@ -83,3 +83,18 @@ LOG_LEVEL = "INFO"
 # This limits the number of out-of-order packets stored in memory per stream.
 ARQ_WINDOW_SIZE = 600
 
+# ARQ timing and retry controls.
+# These defaults are more resilient on lossy/high-latency links and reduce
+# aggressive disconnects when packets or ACKs are delayed.
+ARQ_INITIAL_RTO_SECONDS = 1.0
+ARQ_MAX_RTO_SECONDS = 8.0
+ARQ_CONTROL_INITIAL_RTO_SECONDS = 1.0
+ARQ_CONTROL_MAX_RTO_SECONDS = 8.0
+ARQ_MAX_CONTROL_RETRIES = 80
+ARQ_INACTIVITY_TIMEOUT_SECONDS = 1800.0
+ARQ_DATA_PACKET_TTL_SECONDS = 1800.0
+ARQ_CONTROL_PACKET_TTL_SECONDS = 900.0
+ARQ_MAX_DATA_RETRIES = 800
+ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 90.0
+ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 60.0
+
