@@ -62,6 +62,7 @@ type Stream_client struct {
 	LastResolverFailoverAt time.Time
 	HandshakeLastProgress  time.Time
 
+	txQueueMu     sync.Mutex
 	statusMu      sync.RWMutex
 	terminalSince time.Time
 	socksResultMu sync.Mutex
@@ -167,7 +168,8 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 
 // PushTXPacket adds a packet to the appropriate priority queue if it's not a duplicate.
 func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool {
-	// Generate the tracking key (Policy)
+	dataKey := Enums.PacketIdentityKey(s.StreamID, Enums.PACKET_STREAM_DATA, sequenceNum, fragmentID)
+	resendKey := Enums.PacketIdentityKey(s.StreamID, Enums.PACKET_STREAM_RESEND, sequenceNum, fragmentID)
 	key := Enums.PacketIdentityKey(s.StreamID, packetType, sequenceNum, fragmentID)
 
 	// Delegate to MLQ (Mechanism)
@@ -191,10 +193,39 @@ func (s *Stream_client) PushTXPacket(priority int, packetType uint8, sequenceNum
 	p.RetryCount = 0
 	p.Scheduled = false
 
+	s.txQueueMu.Lock()
+	defer s.txQueueMu.Unlock()
+
+	switch packetType {
+	case Enums.PACKET_STREAM_DATA:
+		if _, exists := s.txQueue.Get(dataKey); exists {
+			s.ReleaseTXPacket(p)
+			return false
+		}
+		if _, exists := s.txQueue.Get(resendKey); exists {
+			s.ReleaseTXPacket(p)
+			return false
+		}
+	case Enums.PACKET_STREAM_RESEND:
+		if _, exists := s.txQueue.Get(resendKey); exists {
+			s.ReleaseTXPacket(p)
+			return false
+		}
+	default:
+	}
+
 	if ok := s.txQueue.Push(priority, key, p); !ok {
 		// Duplicate found in census
 		s.ReleaseTXPacket(p)
 		return false
+	}
+
+	if packetType == Enums.PACKET_STREAM_RESEND {
+		if stale, removed := s.txQueue.RemoveByKey(dataKey, func(p *clientStreamTXPacket) uint64 {
+			return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
+		}); removed {
+			s.ReleaseTXPacket(stale)
+		}
 	}
 
 	select {
@@ -219,6 +250,28 @@ func (s *Stream_client) PopNextTXPacket() (*clientStreamTXPacket, int, bool) {
 func (s *Stream_client) GetQueuedPacket(packetType uint8, sequenceNum uint16, fragmentID uint8) (*clientStreamTXPacket, bool) {
 	key := Enums.PacketIdentityKey(s.StreamID, packetType, sequenceNum, fragmentID)
 	return s.txQueue.Get(key)
+}
+
+func (s *Stream_client) RemoveQueuedData(sequenceNum uint16) bool {
+	if s == nil || s.txQueue == nil {
+		return false
+	}
+
+	s.txQueueMu.Lock()
+	defer s.txQueueMu.Unlock()
+
+	removedAny := false
+	for _, packetType := range []uint8{Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND} {
+		key := Enums.PacketIdentityKey(s.StreamID, packetType, sequenceNum, 0)
+		p, ok := s.txQueue.RemoveByKey(key, func(p *clientStreamTXPacket) uint64 {
+			return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
+		})
+		if ok {
+			s.ReleaseTXPacket(p)
+			removedAny = true
+		}
+	}
+	return removedAny
 }
 
 func (s *Stream_client) cleanupResources() {

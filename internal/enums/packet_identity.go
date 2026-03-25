@@ -8,14 +8,13 @@
 package enums
 
 // PacketIdentityKey builds the queue/deduplication key for stream-owned packets.
-// The key shape is explicit per packet family so deduplication follows current
-// Go semantics rather than applying one formula to every packet type.
+// DATA and RESEND intentionally remain distinct so retransmits can live in their
+// own priority lane while enqueue policy decides coexistence.
 func PacketIdentityKey(streamID uint16, packetType uint8, sequenceNum uint16, fragmentID uint8) uint64 {
-	t := normalizeIdentityPacketType(packetType)
-
-	switch t {
+	switch packetType {
 	// Data and fragment-aware control packets may coexist per fragment.
 	case PACKET_STREAM_DATA,
+		PACKET_STREAM_RESEND,
 		PACKET_STREAM_DATA_ACK,
 		PACKET_STREAM_SYN,
 		PACKET_STREAM_SYN_ACK,
@@ -25,7 +24,7 @@ func PacketIdentityKey(streamID uint16, packetType uint8, sequenceNum uint16, fr
 		PACKET_DNS_QUERY_REQ_ACK,
 		PACKET_DNS_QUERY_RES,
 		PACKET_DNS_QUERY_RES_ACK:
-		return packetIdentitySeqFrag(streamID, t, sequenceNum, fragmentID)
+		return packetIdentitySeqFrag(streamID, packetType, sequenceNum, fragmentID)
 
 	// Terminal / result packets are unique per stream+type+sequence.
 	case PACKET_STREAM_FIN,
@@ -62,22 +61,22 @@ func PacketIdentityKey(streamID uint16, packetType uint8, sequenceNum uint16, fr
 		PACKET_ERROR_DROP,
 		PACKET_PING,
 		PACKET_PONG:
-		return packetIdentitySeq(streamID, t, sequenceNum)
+		return packetIdentitySeq(streamID, packetType, sequenceNum)
 
 	// Session control packets should have at most one queued copy per stream owner.
 	case PACKET_SESSION_CLOSE,
 		PACKET_SESSION_BUSY:
-		return PacketTypeStreamKey(streamID, t)
+		return PacketTypeStreamKey(streamID, packetType)
 
 	default:
-		return packetIdentitySeqFrag(streamID, t, sequenceNum, fragmentID)
+		return packetIdentitySeqFrag(streamID, packetType, sequenceNum, fragmentID)
 	}
 }
 
 // PacketTypeStreamKey builds a coarser identity for cases where the packet type is unique
 // per stream and sequence/fragment should be ignored, such as orphan fallback resets.
 func PacketTypeStreamKey(streamID uint16, packetType uint8) uint64 {
-	return uint64(streamID)<<40 | uint64(normalizeIdentityPacketType(packetType))<<32
+	return uint64(streamID)<<40 | uint64(packetType)<<32
 }
 
 func packetIdentitySeq(streamID uint16, packetType uint8, sequenceNum uint16) uint64 {
@@ -86,13 +85,4 @@ func packetIdentitySeq(streamID uint16, packetType uint8, sequenceNum uint16) ui
 
 func packetIdentitySeqFrag(streamID uint16, packetType uint8, sequenceNum uint16, fragmentID uint8) uint64 {
 	return uint64(streamID)<<40 | uint64(packetType)<<32 | uint64(sequenceNum)<<8 | uint64(fragmentID)
-}
-
-func normalizeIdentityPacketType(packetType uint8) uint8 {
-	switch packetType {
-	case PACKET_STREAM_RESEND:
-		return PACKET_STREAM_DATA
-	default:
-		return packetType
-	}
 }

@@ -20,7 +20,8 @@ import (
 
 // Stream_server encapsulates an ARQ instance and its transmit queue for a single stream.
 type Stream_server struct {
-	mu sync.RWMutex
+	mu        sync.RWMutex
+	txQueueMu sync.Mutex
 
 	ID        uint16
 	SessionID uint8
@@ -72,9 +73,8 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 
 	priority = Enums.NormalizePacketPriority(packetType, priority)
 
-	// Dedup and track logic would go here if needed.
-	// For now, we use the MLQ's census for basic deduplication if we define a unique key.
-	// Key: [Type(8)][Seq(16)][FragID(8)]
+	dataKey := Enums.PacketIdentityKey(s.ID, Enums.PACKET_STREAM_DATA, sequenceNum, fragmentID)
+	resendKey := Enums.PacketIdentityKey(s.ID, Enums.PACKET_STREAM_RESEND, sequenceNum, fragmentID)
 	key := Enums.PacketIdentityKey(s.ID, packetType, sequenceNum, fragmentID)
 
 	pkt := getTXPacketFromPool()
@@ -87,6 +87,26 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 	pkt.CreatedAt = time.Now()
 	pkt.TTL = ttl
 
+	s.txQueueMu.Lock()
+	defer s.txQueueMu.Unlock()
+
+	switch packetType {
+	case Enums.PACKET_STREAM_DATA:
+		if _, exists := s.TXQueue.Get(dataKey); exists {
+			putTXPacketToPool(pkt)
+			return false
+		}
+		if _, exists := s.TXQueue.Get(resendKey); exists {
+			putTXPacketToPool(pkt)
+			return false
+		}
+	case Enums.PACKET_STREAM_RESEND:
+		if _, exists := s.TXQueue.Get(resendKey); exists {
+			putTXPacketToPool(pkt)
+			return false
+		}
+	}
+
 	ok := s.TXQueue.Push(priority, key, pkt)
 	if !ok {
 		// Packet already in queue or failed to push
@@ -94,8 +114,38 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 		return false
 	}
 
+	if packetType == Enums.PACKET_STREAM_RESEND {
+		if stale, removed := s.TXQueue.RemoveByKey(dataKey, func(p *serverStreamTXPacket) uint64 {
+			return Enums.PacketIdentityKey(s.ID, p.PacketType, p.SequenceNum, p.FragmentID)
+		}); removed {
+			putTXPacketToPool(stale)
+		}
+	}
+
 	// Notify session that this stream is active (handled by the caller or session management)
 	return true
+}
+
+func (s *Stream_server) RemoveQueuedData(sequenceNum uint16) bool {
+	if s == nil || s.TXQueue == nil {
+		return false
+	}
+
+	s.txQueueMu.Lock()
+	defer s.txQueueMu.Unlock()
+
+	removedAny := false
+	for _, packetType := range []uint8{Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND} {
+		key := Enums.PacketIdentityKey(s.ID, packetType, sequenceNum, 0)
+		pkt, ok := s.TXQueue.RemoveByKey(key, func(p *serverStreamTXPacket) uint64 {
+			return Enums.PacketIdentityKey(s.ID, p.PacketType, p.SequenceNum, p.FragmentID)
+		})
+		if ok {
+			putTXPacketToPool(pkt)
+			removedAny = true
+		}
+	}
+	return removedAny
 }
 
 func (s *Stream_server) Abort(reason string) {

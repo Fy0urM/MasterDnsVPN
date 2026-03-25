@@ -115,6 +115,50 @@ func (m *MultiLevelQueue[T]) Get(key uint64) (T, bool) {
 	return item, exists
 }
 
+// RemoveByKey removes a specific item if it is still queued.
+// It returns the removed item and true on success.
+func (m *MultiLevelQueue[T]) RemoveByKey(key uint64, keyExtractor func(T) uint64) (T, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var zero T
+	if m.bitmask == 0 {
+		return zero, false
+	}
+
+	if _, exists := m.census[key]; !exists {
+		return zero, false
+	}
+
+	tempMask := m.bitmask
+	for tempMask != 0 {
+		priority := bits.TrailingZeros16(tempMask)
+		q := &m.queues[priority]
+
+		for i, item := range q.Items {
+			if keyExtractor != nil && keyExtractor(item) != key {
+				continue
+			}
+
+			q.Items[i] = zero
+			copy(q.Items[i:], q.Items[i+1:])
+			last := len(q.Items) - 1
+			q.Items[last] = zero
+			q.Items = q.Items[:last]
+
+			delete(m.census, key)
+			if len(q.Items) == 0 {
+				m.bitmask &= ^(1 << uint(priority))
+			}
+			return item, true
+		}
+
+		tempMask &= ^(1 << uint(priority))
+	}
+
+	return zero, false
+}
+
 // Count returns the number of items in a specific priority queue.
 func (m *MultiLevelQueue[T]) Count(priority int) int {
 	m.mu.RLock()

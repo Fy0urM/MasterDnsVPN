@@ -12,8 +12,9 @@ import (
 
 // MockPacketEnqueuer captures packets sent by ARQ
 type MockPacketEnqueuer struct {
-	mu      sync.Mutex
-	Packets chan capturedPacket
+	mu          sync.Mutex
+	Packets     chan capturedPacket
+	removedSeqs []uint16
 }
 
 type capturedPacket struct {
@@ -44,6 +45,13 @@ func (m *MockPacketEnqueuer) PushTXPacket(priority int, packetType uint8, sequen
 		ttl:             ttl,
 		payload:         append([]byte(nil), payload...),
 	}
+	return true
+}
+
+func (m *MockPacketEnqueuer) RemoveQueuedData(sequenceNum uint16) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.removedSeqs = append(m.removedSeqs, sequenceNum)
 	return true
 }
 
@@ -157,6 +165,35 @@ func TestARQ_ReceiveData(t *testing.T) {
 	}
 	if !bytes.Equal(buf[:n], testData) {
 		t.Errorf("expected data %s, got %s", string(testData), string(buf[:n]))
+	}
+}
+
+func TestARQ_ReceiveAckPurgesQueuedDataCopy(t *testing.T) {
+	enqueuer := NewMockPacketEnqueuer()
+	cfg := Config{
+		WindowSize: 100,
+		RTO:        0.1,
+		MaxRTO:     0.5,
+	}
+
+	a := NewARQ(1, 1, enqueuer, nil, 1000, &testLogger{t}, cfg)
+	a.mu.Lock()
+	a.sndBuf[7] = &arqDataItem{
+		Data:       []byte("hello"),
+		CreatedAt:  time.Now(),
+		LastSentAt: time.Now(),
+		CurrentRTO: a.rto,
+	}
+	a.mu.Unlock()
+
+	if !a.ReceiveAck(Enums.PACKET_STREAM_DATA_ACK, 7) {
+		t.Fatal("expected ReceiveAck to handle tracked sequence")
+	}
+
+	enqueuer.mu.Lock()
+	defer enqueuer.mu.Unlock()
+	if len(enqueuer.removedSeqs) != 1 || enqueuer.removedSeqs[0] != 7 {
+		t.Fatalf("expected queued data purge for seq 7, got %#v", enqueuer.removedSeqs)
 	}
 }
 

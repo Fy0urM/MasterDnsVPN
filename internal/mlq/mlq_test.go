@@ -135,3 +135,23 @@ func TestMLQClearInvokesCallbackAndResetsState(t *testing.T) {
 		t.Fatal("pop unexpectedly succeeded after clear")
 	}
 }
+
+func TestMLQRemoveByKeyRemovesQueuedItem(t *testing.T) {
+	q := New[*testItem](8)
+
+	q.Push(4, 10, &testItem{key: 10, value: "data"})
+	q.Push(2, 20, &testItem{key: 20, value: "other"})
+
+	item, ok := q.RemoveByKey(10, testKey)
+	if !ok || item == nil || item.value != "data" {
+		t.Fatalf("unexpected RemoveByKey result: ok=%v item=%v", ok, item)
+	}
+
+	if q.Size() != 1 {
+		t.Fatalf("unexpected size after RemoveByKey: %d", q.Size())
+	}
+
+	if _, exists := q.Get(10); exists {
+		t.Fatal("removed key still present in census")
+	}
+}

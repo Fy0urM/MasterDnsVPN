@@ -39,6 +39,10 @@ type PacketEnqueuer interface {
 	PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool
 }
 
+type queuedDataRemover interface {
+	RemoveQueuedData(sequenceNum uint16) bool
+}
+
 type Logger interface {
 	Debugf(format string, args ...any)
 	Infof(format string, args ...any)
@@ -989,6 +993,10 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 	a.mu.Unlock()
 
 	if handled {
+		if remover, ok := a.enqueuer.(queuedDataRemover); ok {
+			remover.RemoveQueuedData(sn)
+		}
+
 		if a.finReceivedLocked() {
 			a.tryFinalizeRemoteEOF()
 		}
