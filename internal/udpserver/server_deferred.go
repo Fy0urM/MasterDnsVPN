@@ -115,13 +115,10 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet) {
 		return
 	}
 
-	stream.mu.Lock()
-	stream.UpstreamConn = upstreamConn
-	stream.TargetHost = s.cfg.ForwardIP
-	stream.TargetPort = uint16(s.cfg.ForwardPort)
-	stream.Connected = true
-	stream.Status = "CONNECTED"
-	stream.mu.Unlock()
+	if record.isClosed() || !stream.attachUpstreamConn(upstreamConn, s.cfg.ForwardIP, uint16(s.cfg.ForwardPort), "CONNECTED") {
+		_ = upstreamConn.Close()
+		return
+	}
 
 	stream.ARQ.SetLocalConn(upstreamConn)
 	stream.ARQ.SendControlPacketWithTTL(
@@ -254,12 +251,10 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 		return
 	}
 
-	stream.mu.Lock()
-	stream.UpstreamConn = upstreamConn
-	stream.TargetHost = target.Host
-	stream.TargetPort = target.Port
-	stream.Connected = true
-	stream.mu.Unlock()
+	if record.isClosed() || !stream.attachUpstreamConn(upstreamConn, target.Host, target.Port, "CONNECTED") {
+		_ = upstreamConn.Close()
+		return
+	}
 
 	stream.ARQ.SetLocalConn(upstreamConn)
 	stream.ARQ.SetIOReady(true)

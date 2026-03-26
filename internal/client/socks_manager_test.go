@@ -4,8 +4,10 @@ import (
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"masterdnsvpn-go/internal/config"
+	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 func TestSupportsSOCKS4Policy(t *testing.T) {
@@ -65,5 +67,42 @@ func TestSendSocks4ReplyFormatsResponse(t *testing.T) {
 		if reply[i] != want[i] {
 			t.Fatalf("reply[%d] = 0x%02x, want 0x%02x", i, reply[i], want[i])
 		}
+	}
+}
+
+func TestLateSocksResultDoesNotReactivateCancelledStream(t *testing.T) {
+	c := &Client{
+		active_streams: make(map[uint16]*Stream_client),
+	}
+
+	server, clientConn := net.Pipe()
+	defer server.Close()
+	defer clientConn.Close()
+
+	s := &Stream_client{
+		client:            c,
+		StreamID:          7,
+		LocalSocksVersion: SOCKS5_VERSION,
+		NetConn:           server,
+		Status:            streamStatusSocksConnecting,
+		CreateTime:        time.Now(),
+		LastActivityTime:  time.Now(),
+	}
+	c.active_streams[s.StreamID] = s
+
+	c.handlePendingSOCKSLocalClose(s.StreamID, "test cancel")
+	if got := s.StatusValue(); got != streamStatusCancelled {
+		t.Fatalf("expected stream status %q after local close, got %q", streamStatusCancelled, got)
+	}
+
+	if err := c.HandleSocksConnected(VpnProto.Packet{StreamID: s.StreamID}); err != nil {
+		t.Fatalf("HandleSocksConnected returned error: %v", err)
+	}
+
+	if got := s.StatusValue(); got != streamStatusCancelled {
+		t.Fatalf("expected cancelled stream not to reactivate, got %q", got)
+	}
+	if s.TerminalSince().IsZero() {
+		t.Fatal("expected cancelled stream to remain terminal after late SOCKS result")
 	}
 }

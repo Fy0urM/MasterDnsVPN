@@ -65,6 +65,7 @@ type sessionRecord struct {
 	OrphanQueue                     *mlq.MultiLevelQueue[VpnProto.Packet]
 	LastPackedControlBlock          *VpnProto.Packet
 	LastPackedControlBlockRemaining int
+	closedFlag                      uint32
 }
 
 // serverStreamTXPacket represents a queued packet pending transmission or retransmission.
@@ -297,7 +298,7 @@ func (s *sessionStore) Get(sessionID uint8) (*sessionRecord, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	record := s.byID[sessionID]
-	if record == nil {
+	if record == nil || record.isClosed() {
 		return nil, false
 	}
 	return record, true
@@ -309,9 +310,9 @@ func (s *sessionStore) HasActive(sessionID uint8) bool {
 	}
 
 	s.mu.Lock()
-	active := s.byID[sessionID] != nil
+	record := s.byID[sessionID]
 	s.mu.Unlock()
-	return active
+	return record != nil && !record.isClosed()
 }
 
 func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
@@ -385,6 +386,7 @@ func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Dura
 	if record == nil {
 		return nil, false
 	}
+	record.markClosed()
 
 	delete(s.bySig, record.Signature)
 	s.byID[sessionID] = nil
@@ -427,8 +429,10 @@ func (s *sessionStore) Cleanup(now time.Time, idleTimeout time.Duration, closedR
 		if record == nil {
 			continue
 		}
+		record.markClosed()
 		lastActivityUnixNano := record.lastActivity()
 		if lastActivityUnixNano != 0 && nowUnixNano-lastActivityUnixNano < idleTimeoutNanos {
+			record.reopen()
 			continue
 		}
 
@@ -567,14 +571,44 @@ func (r *sessionRecord) runtimeView() sessionRuntimeView {
 	}
 }
 
+func (r *sessionRecord) markClosed() {
+	if r == nil {
+		return
+	}
+	atomic.StoreUint32(&r.closedFlag, 1)
+}
+
+func (r *sessionRecord) reopen() {
+	if r == nil {
+		return
+	}
+	atomic.StoreUint32(&r.closedFlag, 0)
+}
+
+func (r *sessionRecord) isClosed() bool {
+	if r == nil {
+		return true
+	}
+	return atomic.LoadUint32(&r.closedFlag) != 0
+}
+
 // ensureStream0 creates correctly virtual stream 0 if not exist
 func (r *sessionRecord) ensureStream0(logger arq.Logger) {
+	if r == nil || r.isClosed() {
+		return
+	}
 	r.getOrCreateStream(0, arq.Config{IsVirtual: true}, nil, logger)
 }
 
 func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config, localConn io.ReadWriteCloser, logger arq.Logger) *Stream_server {
+	if r == nil || r.isClosed() {
+		return nil
+	}
 	r.StreamsMu.Lock()
 	defer r.StreamsMu.Unlock()
+	if r.isClosed() {
+		return nil
+	}
 
 	if s, ok := r.Streams[streamID]; ok {
 		return s
@@ -613,13 +647,16 @@ func (r *sessionRecord) getOrCreateStream(streamID uint16, arqConfig arq.Config,
 }
 
 func (r *sessionRecord) getStream(streamID uint16) (*Stream_server, bool) {
+	if r == nil || r.isClosed() {
+		return nil, false
+	}
 	r.StreamsMu.RLock()
 	s, ok := r.Streams[streamID]
 	r.StreamsMu.RUnlock()
 	return s, ok
 }
 func (r *sessionRecord) noteStreamClosed(streamID uint16, now time.Time) {
-	if streamID == 0 {
+	if r == nil || r.isClosed() || streamID == 0 {
 		return
 	}
 	r.StreamsMu.Lock()
@@ -652,6 +689,9 @@ func (r *sessionRecord) noteStreamClosed(streamID uint16, now time.Time) {
 }
 
 func (r *sessionRecord) isRecentlyClosed(streamID uint16, now time.Time) bool {
+	if r == nil || r.isClosed() {
+		return false
+	}
 	r.StreamsMu.RLock()
 	defer r.StreamsMu.RUnlock()
 
@@ -678,7 +718,7 @@ func (r *sessionRecord) closedStreamRecordCap() int {
 }
 
 func (r *sessionRecord) removeStream(streamID uint16, now time.Time) {
-	if streamID == 0 {
+	if r == nil || r.isClosed() || streamID == 0 {
 		return
 	}
 	r.StreamsMu.Lock()
@@ -691,7 +731,7 @@ func (r *sessionRecord) removeStream(streamID uint16, now time.Time) {
 }
 
 func (r *sessionRecord) deactivateStream(streamID uint16) {
-	if r == nil || streamID == 0 {
+	if r == nil || r.isClosed() || streamID == 0 {
 		return
 	}
 
@@ -713,6 +753,7 @@ func (r *sessionRecord) closeAllStreams(reason string) {
 	if r == nil {
 		return
 	}
+	r.markClosed()
 
 	r.StreamsMu.RLock()
 	streams := make([]*Stream_server, 0, len(r.Streams))
@@ -738,7 +779,7 @@ func (r *sessionRecord) closeAllStreams(reason string) {
 }
 
 func (r *sessionRecord) cleanupTerminalStreams(now time.Time, retention time.Duration) {
-	if r == nil {
+	if r == nil || r.isClosed() {
 		return
 	}
 
@@ -791,7 +832,7 @@ func orphanResetKey(packetType uint8, streamID uint16) uint64 {
 }
 
 func (r *sessionRecord) enqueueOrphanReset(packetType uint8, streamID uint16, sequenceNum uint16) {
-	if r == nil || r.OrphanQueue == nil || streamID == 0 {
+	if r == nil || r.isClosed() || r.OrphanQueue == nil || streamID == 0 {
 		return
 	}
 

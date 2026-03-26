@@ -156,10 +156,8 @@ func (s *Server) buildSessionVPNResponse(questionPacket []byte, requestName stri
 }
 
 func (s *Server) queueSessionPacket(sessionID uint8, packet VpnProto.Packet) bool {
-	s.sessions.mu.Lock()
-	record := s.sessions.byID[sessionID]
-	s.sessions.mu.Unlock()
-	if record == nil {
+	record, ok := s.sessions.Get(sessionID)
+	if !ok {
 		return false
 	}
 
@@ -233,10 +231,8 @@ func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, re
 }
 
 func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnProto.Packet, bool) {
-	s.sessions.mu.Lock()
-	record := s.sessions.byID[sessionID]
-	s.sessions.mu.Unlock()
-	if record == nil {
+	record, ok := s.sessions.Get(sessionID)
+	if !ok {
 		return nil, false
 	}
 

@@ -160,15 +160,48 @@ func (s *Stream_server) Abort(reason string) {
 	s.CloseStream(true, 0, reason)
 }
 
+func (s *Stream_server) attachUpstreamConn(conn io.ReadWriteCloser, host string, port uint16, status string) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.Status == "CLOSED" || !s.CloseTime.IsZero() {
+		return false
+	}
+	if s.ARQ != nil && s.ARQ.IsClosed() {
+		return false
+	}
+	if s.UpstreamConn != nil || s.Connected {
+		return false
+	}
+
+	s.UpstreamConn = conn
+	s.TargetHost = host
+	s.TargetPort = port
+	s.Connected = true
+	if status != "" {
+		s.Status = status
+	}
+	s.LastActivity = time.Now()
+	return true
+}
+
 func (s *Stream_server) cleanupResources() {
+	var upstream io.ReadWriteCloser
+
 	s.mu.Lock()
 	s.Status = "CLOSED"
 	s.CloseTime = time.Now()
+	s.Connected = false
+	upstream = s.UpstreamConn
+	s.UpstreamConn = nil
 	s.mu.Unlock()
 
-	if s.UpstreamConn != nil {
-		_ = s.UpstreamConn.Close()
-		s.UpstreamConn = nil
+	if upstream != nil {
+		_ = upstream.Close()
 	}
 	s.ClearTXQueue()
 }

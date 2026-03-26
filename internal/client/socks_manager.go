@@ -365,7 +365,18 @@ func (c *Client) handleSOCKSConnect(ctx context.Context, conn net.Conn, addr str
 
 func (c *Client) writeSocksConnectResult(streamID uint16, rep byte) error {
 	s, ok := c.getStream(streamID)
-	if !ok || s == nil || s.NetConn == nil {
+	if !ok || s == nil {
+		return errLateSocksResult
+	}
+
+	s.socksResultMu.Lock()
+	defer s.socksResultMu.Unlock()
+
+	return c.writeSocksConnectResultLocked(s, rep)
+}
+
+func (c *Client) writeSocksConnectResultLocked(s *Stream_client, rep byte) error {
+	if s == nil || s.NetConn == nil {
 		return errLateSocksResult
 	}
 
@@ -458,15 +469,21 @@ func (c *Client) removeStream(streamID uint16) {
 
 func (c *Client) handlePendingSOCKSLocalClose(streamID uint16, reason string) {
 	s, ok := c.getStream(streamID)
-	if !ok || s == nil || s.StatusValue() != streamStatusSocksConnecting {
+	if !ok || s == nil {
 		return
 	}
 
+	s.socksResultMu.Lock()
+	if s.StatusValue() != streamStatusSocksConnecting {
+		s.socksResultMu.Unlock()
+		return
+	}
 	s.SetStatus(streamStatusCancelled)
 	if s.NetConn != nil {
 		_ = s.NetConn.Close()
 	}
 	s.MarkTerminal(time.Now())
+	s.socksResultMu.Unlock()
 
 	arqObj, err := c.getStreamARQ(streamID)
 	if err == nil {
@@ -606,23 +623,26 @@ func (c *Client) HandleSocksConnected(packet VpnProto.Packet) error {
 	}
 
 	s.socksResultMu.Lock()
-	defer s.socksResultMu.Unlock()
-
 	switch s.StatusValue() {
 	case streamStatusActive:
+		s.socksResultMu.Unlock()
 		return nil
 	case streamStatusSocksFailed, streamStatusDraining, streamStatusClosing, streamStatusTimeWait, streamStatusClosed:
+		s.socksResultMu.Unlock()
 		return nil
 	}
 
 	if ok && s.StatusValue() == streamStatusCancelled {
+		s.socksResultMu.Unlock()
 		if arqObj, err := c.getStreamARQ(packet.StreamID); err == nil {
 			arqObj.Close("late SOCKS success after local cancellation", arq.CloseOptions{Force: true})
 		}
 		return nil
 	}
 
-	if err := c.writeSocksConnectResult(packet.StreamID, SOCKS5_REPLY_SUCCESS); err != nil {
+	err := c.writeSocksConnectResultLocked(s, SOCKS5_REPLY_SUCCESS)
+	s.socksResultMu.Unlock()
+	if err != nil {
 		if errors.Is(err, errLateSocksResult) {
 			if arqObj, arqErr := c.getStreamARQ(packet.StreamID); arqErr == nil {
 				arqObj.Close("late SOCKS success result", arq.CloseOptions{Force: true})
@@ -649,14 +669,14 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 	}
 
 	s.socksResultMu.Lock()
-	defer s.socksResultMu.Unlock()
-
 	switch s.StatusValue() {
 	case streamStatusSocksFailed, streamStatusDraining, streamStatusClosing, streamStatusTimeWait, streamStatusClosed:
+		s.socksResultMu.Unlock()
 		return nil
 	}
 
 	if ok && s.StatusValue() == streamStatusCancelled {
+		s.socksResultMu.Unlock()
 		arqObj, err := c.getStreamARQ(packet.StreamID)
 		if err == nil {
 			arqObj.Close("SOCKS failure received after local cancellation", arq.CloseOptions{Force: true})
@@ -664,7 +684,9 @@ func (c *Client) HandleSocksFailure(packet VpnProto.Packet) error {
 		return nil
 	}
 
-	if err := c.writeSocksConnectResult(packet.StreamID, socksReplyForPacketType(packet.PacketType)); err != nil {
+	err := c.writeSocksConnectResultLocked(s, socksReplyForPacketType(packet.PacketType))
+	s.socksResultMu.Unlock()
+	if err != nil {
 		if errors.Is(err, errLateSocksResult) {
 			if arqObj, arqErr := c.getStreamARQ(packet.StreamID); arqErr == nil {
 				arqObj.Close("late SOCKS failure result", arq.CloseOptions{Force: true})

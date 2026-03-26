@@ -283,3 +283,20 @@ func TestHandleStreamRSTRequestPreservesRstAckViaOrphanQueue(t *testing.T) {
 		t.Fatalf("unexpected orphan RST_ACK packet: %+v", ackPkt)
 	}
 }
+
+func TestClosedSessionRecordRejectsPostCloseStreamAccess(t *testing.T) {
+	record := newTestSessionRecord(15)
+	record.ensureStream0(nil)
+	record.markClosed()
+
+	if _, ok := record.getStream(0); ok {
+		t.Fatal("expected closed record to reject getStream")
+	}
+	if got := record.getOrCreateStream(9, arq.Config{}, nil, nil); got != nil {
+		t.Fatal("expected closed record to reject getOrCreateStream")
+	}
+	record.ensureStream0(nil)
+	if _, ok := record.getStream(9); ok {
+		t.Fatal("expected ensureStream0 to no-op after close")
+	}
+}

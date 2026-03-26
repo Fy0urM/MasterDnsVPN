@@ -9,6 +9,7 @@ package udpserver
 
 import (
 	"errors"
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -18,6 +19,24 @@ import (
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
+
+type testNetConn struct {
+	closed bool
+}
+
+func (t *testNetConn) Read(_ []byte) (int, error)         { return 0, io.EOF }
+func (t *testNetConn) Write(p []byte) (int, error)        { return len(p), nil }
+func (t *testNetConn) Close() error                       { t.closed = true; return nil }
+func (t *testNetConn) LocalAddr() net.Addr                { return testAddr("local") }
+func (t *testNetConn) RemoteAddr() net.Addr               { return testAddr("remote") }
+func (t *testNetConn) SetDeadline(_ time.Time) error      { return nil }
+func (t *testNetConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (t *testNetConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+type testAddr string
+
+func (a testAddr) Network() string { return "tcp" }
+func (a testAddr) String() string  { return string(a) }
 
 func newTestServerForStreamSyn(protocol string) *Server {
 	return &Server{
@@ -132,6 +151,49 @@ func TestProcessDeferredStreamSynQueuesConnectFailOnDialError(t *testing.T) {
 	}
 	if pkt.TTL != s.cfg.StreamFailurePacketTTL() {
 		t.Fatalf("unexpected STREAM_CONNECT_FAIL TTL: got=%s want=%s", pkt.TTL, s.cfg.StreamFailurePacketTTL())
+	}
+}
+
+func TestProcessDeferredStreamSynIgnoresLateDialCompletionAfterSessionClose(t *testing.T) {
+	s := newTestServerForStreamSyn("TCP")
+	record := newTestSessionRecord(23)
+	record.DownloadCompression = 0
+	s.sessions.byID[record.ID] = record
+
+	conn := &testNetConn{}
+	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
+		record.markClosed()
+		return conn, nil
+	}
+
+	packet := packetWithSession(Enums.PACKET_STREAM_SYN, record.ID, record.Cookie, 30)
+	s.processDeferredStreamSyn(packet)
+
+	record.StreamsMu.RLock()
+	stream := record.Streams[30]
+	record.StreamsMu.RUnlock()
+	if stream == nil {
+		t.Fatal("expected stream to exist after STREAM_SYN processing")
+	}
+
+	stream.mu.RLock()
+	connected := stream.Connected
+	upstream := stream.UpstreamConn
+	stream.mu.RUnlock()
+
+	if connected {
+		t.Fatal("expected late dial completion not to mark stream connected")
+	}
+	if upstream != nil {
+		t.Fatal("expected no upstream connection to be attached after session close")
+	}
+	if !conn.closed {
+		t.Fatal("expected late dialed connection to be closed")
+	}
+
+	key := Enums.PacketIdentityKey(stream.ID, Enums.PACKET_STREAM_CONNECTED, packet.SequenceNum, 0)
+	if pkt, ok := stream.TXQueue.Get(key); ok || pkt != nil {
+		t.Fatal("expected no STREAM_CONNECTED packet after late dial completion")
 	}
 }
 

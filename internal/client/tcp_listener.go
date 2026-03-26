@@ -8,9 +8,11 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"time"
 )
 
 type TCPListener struct {
@@ -43,13 +45,23 @@ func (l *TCPListener) Start(ctx context.Context, ip string, port int) error {
 		for {
 			conn, err := activeListener.Accept()
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				select {
 				case <-l.stopChan:
 					return
 				case <-ctx.Done():
 					return
 				default:
-					continue
+					if listenerShouldRetryAccept(err) {
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					if l.client != nil && l.client.log != nil {
+						l.client.log.Warnf("⚠️ <yellow>%s listener stopped after accept error: %v</yellow>", l.protocolType, err)
+					}
+					return
 				}
 			}
 			go l.handleConnection(ctx, conn, l.protocolType)
@@ -70,6 +82,25 @@ func (l *TCPListener) Stop() {
 			l.listener = nil
 		}
 	})
+}
+
+func listenerShouldRetryAccept(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		type temporary interface {
+			Temporary() bool
+		}
+		if tempErr, ok := any(netErr).(temporary); ok && tempErr.Temporary() {
+			return true
+		}
+	}
+	return false
 }
 
 // handleConnection manages the local proxy/TCP forwarding handshake and requests.

@@ -8,6 +8,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -57,13 +58,23 @@ func (l *DNSListener) Start(ctx context.Context, ip string, port int) error {
 		for {
 			n, peerAddr, err := l.conn.ReadFromUDP(buf)
 			if err != nil {
+				if errors.Is(err, net.ErrClosed) {
+					return
+				}
 				select {
 				case <-l.stopChan:
 					return
 				case <-ctx.Done():
 					return
 				default:
-					continue
+					if dnsListenerShouldRetryRead(err) {
+						time.Sleep(100 * time.Millisecond)
+						continue
+					}
+					if l.client != nil && l.client.log != nil {
+						l.client.log.Warnf("⚠️ <yellow>DNS listener stopped after read error: %v</yellow>", err)
+					}
+					return
 				}
 			}
 			// Copy data for the handler to prevent overwrite race condition
@@ -74,6 +85,25 @@ func (l *DNSListener) Start(ctx context.Context, ip string, port int) error {
 	}()
 
 	return nil
+}
+
+func dnsListenerShouldRetryRead(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		type temporary interface {
+			Temporary() bool
+		}
+		if tempErr, ok := any(netErr).(temporary); ok && tempErr.Temporary() {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *DNSListener) Stop() {
