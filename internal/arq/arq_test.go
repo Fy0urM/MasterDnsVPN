@@ -20,6 +20,8 @@ type MockPacketEnqueuer struct {
 	removedSeqs []uint16
 }
 
+type RejectingPacketEnqueuer struct{}
+
 type capturedPacket struct {
 	priority        int
 	packetType      uint8
@@ -56,6 +58,10 @@ func (m *MockPacketEnqueuer) RemoveQueuedData(sequenceNum uint16) bool {
 	defer m.mu.Unlock()
 	m.removedSeqs = append(m.removedSeqs, sequenceNum)
 	return true
+}
+
+func (RejectingPacketEnqueuer) PushTXPacket(priority int, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, compressionType uint8, ttl time.Duration, payload []byte) bool {
+	return false
 }
 
 type testLogger struct {
@@ -1140,6 +1146,94 @@ func TestARQ_WriteDeadlineTimeoutRetriesAndFlushes(t *testing.T) {
 		default:
 			time.Sleep(20 * time.Millisecond)
 		}
+	}
+}
+
+func TestARQ_DataRetransmitDoesNotAdvanceRetryOrRTOWhenEnqueueRejected(t *testing.T) {
+	a := NewARQ(1, 1, RejectingPacketEnqueuer{}, nil, 1000, &testLogger{t}, Config{
+		WindowSize: 100,
+		RTO:        0.1,
+		MaxRTO:     0.5,
+	})
+
+	now := time.Now()
+	a.mu.Lock()
+	a.sndBuf[9] = &arqDataItem{
+		Data:            []byte("payload"),
+		CreatedAt:       now.Add(-time.Second),
+		LastSentAt:      now.Add(-time.Second),
+		Retries:         2,
+		CurrentRTO:      200 * time.Millisecond,
+		CompressionType: 0,
+	}
+	beforeLastSent := a.sndBuf[9].LastSentAt
+	beforeRetries := a.sndBuf[9].Retries
+	beforeRTO := a.sndBuf[9].CurrentRTO
+	a.mu.Unlock()
+
+	a.checkRetransmits()
+
+	a.mu.RLock()
+	info := a.sndBuf[9]
+	a.mu.RUnlock()
+	if info == nil {
+		t.Fatal("expected pending data item to remain tracked")
+	}
+	if info.Retries != beforeRetries {
+		t.Fatalf("expected retries to stay at %d, got %d", beforeRetries, info.Retries)
+	}
+	if info.CurrentRTO != beforeRTO {
+		t.Fatalf("expected CurrentRTO to stay at %v, got %v", beforeRTO, info.CurrentRTO)
+	}
+	if !info.LastSentAt.Equal(beforeLastSent) {
+		t.Fatalf("expected LastSentAt to stay at %v, got %v", beforeLastSent, info.LastSentAt)
+	}
+}
+
+func TestARQ_ControlRetransmitDoesNotAdvanceRetryOrRTOWhenEnqueueRejected(t *testing.T) {
+	a := NewARQ(1, 1, RejectingPacketEnqueuer{}, nil, 1000, &testLogger{t}, Config{
+		WindowSize:               100,
+		RTO:                      0.1,
+		MaxRTO:                   0.5,
+		EnableControlReliability: true,
+		ControlRTO:               0.1,
+		ControlMaxRTO:            0.5,
+		ControlMaxRetries:        8,
+	})
+
+	now := time.Now()
+	key := uint32(Enums.PACKET_STREAM_FIN)<<24 | uint32(7)<<8
+	a.mu.Lock()
+	a.controlSndBuf[key] = &arqControlItem{
+		PacketType:  Enums.PACKET_STREAM_FIN,
+		SequenceNum: 7,
+		AckType:     Enums.PACKET_STREAM_FIN_ACK,
+		CreatedAt:   now.Add(-time.Second),
+		LastSentAt:  now.Add(-time.Second),
+		Retries:     3,
+		CurrentRTO:  200 * time.Millisecond,
+	}
+	beforeLastSent := a.controlSndBuf[key].LastSentAt
+	beforeRetries := a.controlSndBuf[key].Retries
+	beforeRTO := a.controlSndBuf[key].CurrentRTO
+	a.mu.Unlock()
+
+	a.checkControlRetransmits(time.Now())
+
+	a.mu.RLock()
+	info := a.controlSndBuf[key]
+	a.mu.RUnlock()
+	if info == nil {
+		t.Fatal("expected tracked control packet to remain queued")
+	}
+	if info.Retries != beforeRetries {
+		t.Fatalf("expected retries to stay at %d, got %d", beforeRetries, info.Retries)
+	}
+	if info.CurrentRTO != beforeRTO {
+		t.Fatalf("expected CurrentRTO to stay at %v, got %v", beforeRTO, info.CurrentRTO)
+	}
+	if !info.LastSentAt.Equal(beforeLastSent) {
+		t.Fatalf("expected LastSentAt to stay at %v, got %v", beforeLastSent, info.LastSentAt)
 	}
 }
 

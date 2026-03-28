@@ -1365,7 +1365,12 @@ func (a *ARQ) checkRetransmits() {
 	}
 
 	a.mu.Lock()
-	var jobs []rtxJob
+	type pendingRetransmit struct {
+		sn              uint16
+		data            []byte
+		compressionType uint8
+	}
+	var jobs []pendingRetransmit
 
 	for sn, info := range a.sndBuf {
 		if info.TTL > 0 {
@@ -1384,21 +1389,24 @@ func (a *ARQ) checkRetransmits() {
 			continue
 		}
 
-		jobs = append(jobs, rtxJob{
+		jobs = append(jobs, pendingRetransmit{
 			sn:              sn,
 			data:            info.Data,
 			compressionType: info.CompressionType,
 		})
-
-		info.LastSentAt = now
-		info.Retries++
-
-		grownRTO := time.Duration(float64(info.CurrentRTO) * 1.2)
-		info.CurrentRTO = time.Duration(minF(float64(a.maxRTO), maxF(float64(a.rto), float64(grownRTO))))
 	}
 	a.mu.Unlock()
 
-	priorityKinds := a.retransmitPriorityKinds(jobs)
+	rtxJobs := make([]rtxJob, 0, len(jobs))
+	for _, job := range jobs {
+		rtxJobs = append(rtxJobs, rtxJob{
+			sn:              job.sn,
+			data:            job.data,
+			compressionType: job.compressionType,
+		})
+	}
+
+	priorityKinds := a.retransmitPriorityKinds(rtxJobs)
 	for i, j := range jobs {
 		priority := Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA)
 		packetType := uint8(Enums.PACKET_STREAM_DATA)
@@ -1408,11 +1416,24 @@ func (a *ARQ) checkRetransmits() {
 			packetType = uint8(Enums.PACKET_STREAM_RESEND)
 		}
 
-		a.enqueuer.PushTXPacket(
+		ok := a.enqueuer.PushTXPacket(
 			priority,
 			packetType,
 			j.sn, 0, 0, j.compressionType, 0, j.data,
 		)
+		if !ok {
+			continue
+		}
+
+		a.mu.Lock()
+		info, exists := a.sndBuf[j.sn]
+		if exists {
+			info.LastSentAt = now
+			info.Retries++
+			grownRTO := time.Duration(float64(info.CurrentRTO) * 1.2)
+			info.CurrentRTO = time.Duration(minF(float64(a.maxRTO), maxF(float64(a.rto), float64(grownRTO))))
+		}
+		a.mu.Unlock()
 	}
 
 	if a.enableControlReliability {
@@ -1601,7 +1622,6 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 
 		ok := a.enqueuer.PushTXPacket(info.Priority, info.PacketType, info.SequenceNum, info.FragmentID, info.TotalFragments, 0, info.TTL, info.Payload)
 		if !ok {
-			info.LastSentAt = now
 			continue
 		}
 
