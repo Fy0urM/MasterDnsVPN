@@ -47,10 +47,11 @@ func newTestSessionRecord(sessionID uint8) *sessionRecord {
 
 func newTestServerForCleanup() *Server {
 	return &Server{
-		deferredSession:  nil,
-		deferredInflight: make(map[uint64]struct{}, 8),
-		dnsFragments:     fragmentStore.New[dnsFragmentKey](8),
-		socks5Fragments:  fragmentStore.New[socks5FragmentKey](8),
+		deferredInflight:       make(map[uint64]struct{}, 8),
+		dnsFragments:           fragmentStore.New[dnsFragmentKey](8),
+		socks5Fragments:        fragmentStore.New[socks5FragmentKey](8),
+		deferredDNSSession:     nil,
+		deferredConnectSession: nil,
 	}
 }
 

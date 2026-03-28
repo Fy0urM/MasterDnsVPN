@@ -59,11 +59,12 @@ func newTestServerForStreamSyn(protocol string) *Server {
 			ARQTerminalDrainTimeoutSec:    30.0,
 			ARQTerminalAckWaitTimeoutSec:  10.0,
 		},
-		sessions:         newSessionStore(8, 32),
-		deferredSession:  newDeferredSessionProcessor(1, 8, nil),
-		deferredInflight: make(map[uint64]struct{}, 8),
-		dnsFragments:     fragmentStore.New[dnsFragmentKey](8),
-		socks5Fragments:  fragmentStore.New[socks5FragmentKey](8),
+		sessions:               newSessionStore(8, 32),
+		deferredDNSSession:     newDeferredSessionProcessor(1, 8, nil),
+		deferredConnectSession: newDeferredSessionProcessor(1, 8, nil),
+		deferredInflight:       make(map[uint64]struct{}, 8),
+		dnsFragments:           fragmentStore.New[dnsFragmentKey](8),
+		socks5Fragments:        fragmentStore.New[socks5FragmentKey](8),
 	}
 }
 
@@ -142,7 +143,7 @@ func TestHandleStreamSynDedupesPendingDeferredDuplicates(t *testing.T) {
 		t.Fatal("expected duplicate pending STREAM_SYN to be acknowledged")
 	}
 
-	if pending := s.deferredSession.workers[0].pending.Load(); pending != 1 {
+	if pending := s.deferredConnectSession.workers[0].pending.Load(); pending != 1 {
 		t.Fatalf("expected exactly one deferred STREAM_SYN task, got %d", pending)
 	}
 

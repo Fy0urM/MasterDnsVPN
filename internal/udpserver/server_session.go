@@ -213,7 +213,12 @@ func (s *Server) cleanupClosedSession(sessionID uint8, record *sessionRecord) {
 	if record != nil {
 		record.closeAllStreams("session closed cleanup")
 	}
-	s.deferredSession.RemoveSession(sessionID)
+	if s.deferredDNSSession != nil {
+		s.deferredDNSSession.RemoveSession(sessionID)
+	}
+	if s.deferredConnectSession != nil {
+		s.deferredConnectSession.RemoveSession(sessionID)
+	}
 	s.removeDNSQueryFragmentsForSession(sessionID)
 }
 
@@ -540,10 +545,22 @@ func isDeferredPostSessionPacketType(packetType uint8) bool {
 }
 
 func (s *Server) dispatchDeferredSessionPacket(packet VpnProto.Packet, run func()) bool {
-	if s == nil || s.deferredSession == nil || !isDeferredPostSessionPacketType(packet.PacketType) {
+	if s == nil || !isDeferredPostSessionPacketType(packet.PacketType) {
 		return false
 	}
-	return s.deferredSession.Enqueue(deferredSessionLaneForPacket(packet), run)
+	var processor *deferredSessionProcessor
+	switch packet.PacketType {
+	case Enums.PACKET_DNS_QUERY_REQ:
+		processor = s.deferredDNSSession
+	case Enums.PACKET_STREAM_SYN, Enums.PACKET_SOCKS5_SYN:
+		processor = s.deferredConnectSession
+	default:
+		return false
+	}
+	if processor == nil {
+		return false
+	}
+	return processor.Enqueue(deferredSessionLaneForPacket(packet), run)
 }
 
 func isPreSessionRequestType(packetType uint8) bool {

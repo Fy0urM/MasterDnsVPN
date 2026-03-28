@@ -43,7 +43,8 @@ type Server struct {
 	codec                    *security.Codec
 	domainMatcher            *domainMatcher.Matcher
 	sessions                 *sessionStore
-	deferredSession          *deferredSessionProcessor
+	deferredDNSSession       *deferredSessionProcessor
+	deferredConnectSession   *deferredSessionProcessor
 	invalidCookieTracker     *invalidCookieTracker
 	dnsCache                 *dnsCache.Store
 	dnsResolveInflight       *dnsResolveInflightManager
@@ -110,14 +111,16 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	if socksConnectTimeout <= 0 {
 		socksConnectTimeout = 8 * time.Second
 	}
+	dnsDeferredWorkers, connectDeferredWorkers, dnsDeferredQueue, connectDeferredQueue := splitDeferredSessionPools(cfg.DeferredSessionWorkers, cfg.DeferredSessionQueueLimit)
 	return &Server{
-		cfg:                  cfg,
-		log:                  log,
-		codec:                codec,
-		domainMatcher:        domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
-		sessions:             newSessionStore(cfg.SessionOrphanQueueInitialCap, cfg.StreamQueueInitialCapacity, cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap),
-		deferredSession:      newDeferredSessionProcessor(cfg.DeferredSessionWorkers, cfg.DeferredSessionQueueLimit, log),
-		invalidCookieTracker: newInvalidCookieTracker(),
+		cfg:                    cfg,
+		log:                    log,
+		codec:                  codec,
+		domainMatcher:          domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
+		sessions:               newSessionStore(cfg.SessionOrphanQueueInitialCap, cfg.StreamQueueInitialCapacity, cfg.SessionInitReuseTTL(), cfg.RecentlyClosedStreamTTL(), cfg.RecentlyClosedStreamCap),
+		deferredDNSSession:     newDeferredSessionProcessor(dnsDeferredWorkers, dnsDeferredQueue, log),
+		deferredConnectSession: newDeferredSessionProcessor(connectDeferredWorkers, connectDeferredQueue, log),
+		invalidCookieTracker:   newInvalidCookieTracker(),
 		dnsCache: dnsCache.New(
 			cfg.DNSCacheMaxRecords,
 			time.Duration(cfg.DNSCacheTTLSeconds*float64(time.Second)),
@@ -163,6 +166,25 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 	}
 }
 
+func splitDeferredSessionPools(totalWorkers int, totalQueue int) (dnsWorkers int, connectWorkers int, dnsQueue int, connectQueue int) {
+	if totalWorkers <= 0 {
+		totalWorkers = 1
+	}
+	if totalQueue <= 0 {
+		totalQueue = 256
+	}
+
+	// DNS queries use a dedicated lightweight pool so connect-heavy work keeps
+	// the full user-configured deferred capacity.
+	dnsWorkers = 1
+	connectWorkers = totalWorkers
+
+	connectQueue = totalQueue
+	dnsQueue = min(max(totalQueue/4, 64), 256)
+
+	return dnsWorkers, connectWorkers, dnsQueue, connectQueue
+}
+
 func (s *Server) Run(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -197,7 +219,8 @@ func (s *Server) Run(ctx context.Context) error {
 		s.sessionCleanupLoop(runCtx)
 	}()
 
-	s.deferredSession.Start(runCtx)
+	s.deferredDNSSession.Start(runCtx)
+	s.deferredConnectSession.Start(runCtx)
 	s.startDNSWorkers(runCtx, conn, reqCh, &workerWG)
 
 	go func() {
