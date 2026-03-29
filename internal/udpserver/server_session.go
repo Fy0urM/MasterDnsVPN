@@ -326,6 +326,7 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 				return Enums.PacketIdentityKey(uint16(id), p.PacketType, p.SequenceNum, p.FragmentID)
 			})
 			if ok {
+				stream.NoteTXPacketDequeued(popped)
 				if (popped.PacketType == Enums.PACKET_STREAM_DATA || popped.PacketType == Enums.PACKET_STREAM_RESEND) &&
 					stream.ARQ != nil && !stream.ARQ.HasPendingSequence(popped.SequenceNum) {
 					putTXPacketToPool(popped)
@@ -455,6 +456,7 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 				if !ok {
 					break
 				}
+				stream.NoteTXPacketDequeued(popped)
 				payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, uint16(id), popped.SequenceNum, popped.FragmentID, popped.TotalFragments)
 				blocks++
 			}

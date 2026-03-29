@@ -69,6 +69,8 @@ type arqDataItem struct {
 	Data            []byte
 	CreatedAt       time.Time
 	LastSentAt      time.Time
+	Dispatched      bool
+	LastNackSentAt  time.Time
 	Retries         int
 	CurrentRTO      time.Duration
 	SampleEligible  bool
@@ -86,6 +88,7 @@ type arqControlItem struct {
 	Priority       int
 	CreatedAt      time.Time
 	LastSentAt     time.Time
+	Dispatched     bool
 	Retries        int
 	CurrentRTO     time.Duration
 	SampleEligible bool
@@ -632,6 +635,30 @@ func (a *ARQ) noteSuccessfulControlSample(sample time.Duration) {
 	a.mu.Unlock()
 }
 
+func (a *ARQ) NoteTXPacketDequeued(packetType uint8, sequenceNum uint16, fragmentID uint8) {
+	now := time.Now()
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	switch packetType {
+	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
+		if info, exists := a.sndBuf[sequenceNum]; exists {
+			info.LastSentAt = now
+			info.Dispatched = true
+		}
+	default:
+		if !a.enableControlReliability {
+			return
+		}
+		key := uint32(packetType)<<24 | uint32(sequenceNum)<<8 | uint32(fragmentID)
+		if info, exists := a.controlSndBuf[key]; exists {
+			info.LastSentAt = now
+			info.Dispatched = true
+		}
+	}
+}
+
 // ---------------------------------------------------------------------
 // Transitions & Hooks
 // ---------------------------------------------------------------------
@@ -936,7 +963,8 @@ func (a *ARQ) ioLoop() {
 			a.sndBuf[sn] = &arqDataItem{
 				Data:            raw,
 				CreatedAt:       time.Now(),
-				LastSentAt:      time.Now(),
+				LastSentAt:      time.Time{},
+				Dispatched:      false,
 				Retries:         0,
 				CurrentRTO:      currentRTO,
 				SampleEligible:  true,
@@ -1284,7 +1312,6 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
 	a.mu.Unlock()
 
 	a.clearSentDataNack(sn)
-
 	a.enqueuer.PushTXPacket(
 		Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK),
 		Enums.PACKET_STREAM_DATA_ACK,
@@ -1458,7 +1485,7 @@ func (a *ARQ) ReceiveAck(packetType uint8, sn uint16) bool {
 	sampleEligible := false
 
 	if info, exists := a.sndBuf[sn]; exists {
-		if info.SampleEligible && !info.LastSentAt.IsZero() {
+		if info.SampleEligible && info.Dispatched && !info.LastSentAt.IsZero() {
 			sample = now.Sub(info.LastSentAt)
 			sampleEligible = true
 		}
@@ -1499,6 +1526,12 @@ func (a *ARQ) HandleDataNack(sn uint16) bool {
 		a.mu.Unlock()
 		return false
 	}
+	prevNackSentAt := info.LastNackSentAt
+	if !prevNackSentAt.IsZero() && now.Sub(prevNackSentAt) < a.dataNackRepeatInterval {
+		a.mu.Unlock()
+		return false
+	}
+	info.LastNackSentAt = now
 
 	data := append([]byte(nil), info.Data...)
 	compressionType := info.CompressionType
@@ -1511,6 +1544,11 @@ func (a *ARQ) HandleDataNack(sn uint16) bool {
 		sn, 0, 0, compressionType, ttl, data,
 	)
 	if !ok {
+		a.mu.Lock()
+		if info, exists := a.sndBuf[sn]; exists && info.LastNackSentAt.Equal(now) {
+			info.LastNackSentAt = prevNackSentAt
+		}
+		a.mu.Unlock()
 		return false
 	}
 	a.mu.Lock()
@@ -1535,13 +1573,29 @@ func (a *ARQ) maybeSendDataNacks(sn uint16) {
 	}
 
 	diff := sn - rcvNxt
-	if diff == 0 || diff >= 32768 || int(diff) > a.dataNackMaxGap {
+	if diff == 0 || diff >= 32768 {
 		return
 	}
 
+	windowSpan := uint16(a.dataNackMaxGap)
+	start := rcvNxt
+	if diff > windowSpan {
+		start = sn - windowSpan
+	}
+
+	a.mu.RLock()
+	missingSeqs := make([]uint16, 0, a.dataNackMaxGap)
+	for missing := start; missing != sn; missing++ {
+		if _, buffered := a.rcvBuf[missing]; buffered {
+			continue
+		}
+		missingSeqs = append(missingSeqs, missing)
+	}
+	a.mu.RUnlock()
+
 	now := time.Now()
 	minInterval := a.dataNackRepeatInterval
-	for missing := rcvNxt; missing != sn; missing++ {
+	for _, missing := range missingSeqs {
 		if !a.shouldSendDataNack(missing, now, minInterval) {
 			continue
 		}
@@ -1637,7 +1691,8 @@ func (a *ARQ) SendControlPacketWithTTL(packetType uint8, sequenceNum uint16, fra
 		Payload:        copyData,
 		Priority:       priority,
 		CreatedAt:      now,
-		LastSentAt:     now,
+		LastSentAt:     time.Time{},
+		Dispatched:     false,
 		Retries:        0,
 		CurrentRTO:     initialRTO,
 		SampleEligible: true,
@@ -1753,7 +1808,7 @@ func (a *ARQ) ReceiveControlAck(ackPacketType uint8, sequenceNum uint16, fragmen
 	}
 
 	if tracked {
-		if info != nil && info.SampleEligible && !info.LastSentAt.IsZero() {
+		if info != nil && info.SampleEligible && info.Dispatched && !info.LastSentAt.IsZero() {
 			sample = now.Sub(info.LastSentAt)
 			sampleEligible = true
 		}
@@ -1836,7 +1891,7 @@ func (a *ARQ) checkRetransmits() {
 			return
 		}
 
-		if now.Sub(info.LastSentAt) < info.CurrentRTO {
+		if !info.Dispatched || now.Sub(info.LastSentAt) < info.CurrentRTO {
 			continue
 		}
 
@@ -1881,6 +1936,7 @@ func (a *ARQ) checkRetransmits() {
 		if exists {
 			dataFloor := a.currentDataBaseRTO()
 			info.LastSentAt = now
+			info.Dispatched = false
 			info.Retries++
 			info.SampleEligible = false
 			grownRTO := time.Duration(float64(info.CurrentRTO) * dataRetransmitRTOGrowthFactor)
@@ -2089,7 +2145,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 			// no-op: legacy retry ownership remains active for non-TTL packets
 		}
 
-		if now.Sub(info.LastSentAt) < info.CurrentRTO {
+		if !info.Dispatched || now.Sub(info.LastSentAt) < info.CurrentRTO {
 			continue
 		}
 
@@ -2099,6 +2155,7 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 		}
 
 		info.LastSentAt = now
+		info.Dispatched = false
 		info.Retries++
 		info.SampleEligible = false
 		growth := controlRetransmitRTOGrowthFactor

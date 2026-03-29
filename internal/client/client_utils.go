@@ -12,6 +12,7 @@ package client
 import (
 	"crypto/rand"
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -63,12 +64,100 @@ func makeConnectionKey(resolver string, port int, domain string) string {
 	return resolver + "|" + strconv.Itoa(port) + "|" + domain
 }
 
+func isHotPacketLogType(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_DATA,
+		Enums.PACKET_STREAM_DATA_ACK,
+		Enums.PACKET_STREAM_DATA_NACK,
+		Enums.PACKET_STREAM_RESEND,
+		Enums.PACKET_PACKED_CONTROL_BLOCKS,
+		Enums.PACKET_PING,
+		Enums.PACKET_PONG:
+		return true
+	default:
+		return false
+	}
+}
+
+func (c *Client) logInboundPacket(packetType uint8, sessionID uint8, payloadLen int, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8, packedSummary string) {
+	if c == nil || c.log == nil || packetType == Enums.PACKET_PONG {
+		return
+	}
+	format := "<green>Receiving Packet, Packet: %s | Session %d | Payload Len(%d) | Stream: %d | Seq: %d | Fg: %d | TF: %d%s</green>"
+	if isHotPacketLogType(packetType) {
+		if c.log.Enabled(logger.LevelDebug) {
+			c.log.Debugf(format, Enums.PacketTypeName(packetType), sessionID, payloadLen, streamID, sequenceNum, fragmentID, totalFragments, packedSummary)
+		}
+		return
+	}
+	c.log.Warnf(format, Enums.PacketTypeName(packetType), sessionID, payloadLen, streamID, sequenceNum, fragmentID, totalFragments, packedSummary)
+}
+
+func (c *Client) logOutboundPacket(packetType uint8, sessionID uint8, payloadLen int, streamID uint16, sequenceNum uint16, fragmentID uint8, totalFragments uint8, packedSummary string) {
+	if c == nil || c.log == nil || packetType == Enums.PACKET_PING {
+		return
+	}
+	format := "<cyan>Sending Packet, Packet: Packet: %s | Session %d | Payload Len(%d) | Stream: %d | Seq: %d | Fg: %d | TF: %d%s</cyan>"
+	if isHotPacketLogType(packetType) {
+		if c.log.Enabled(logger.LevelDebug) {
+			c.log.Debugf(format, Enums.PacketTypeName(packetType), sessionID, payloadLen, streamID, sequenceNum, fragmentID, totalFragments, packedSummary)
+		}
+		return
+	}
+	c.log.Warnf(format, Enums.PacketTypeName(packetType), sessionID, payloadLen, streamID, sequenceNum, fragmentID, totalFragments, packedSummary)
+}
+
+func (c *Client) getResolverUDPAddr(conn Connection) (*net.UDPAddr, error) {
+	if c == nil {
+		return nil, ErrNoValidConnections
+	}
+
+	label := conn.ResolverLabel
+	if label == "" {
+		label = formatResolverEndpoint(conn.Resolver, conn.ResolverPort)
+	}
+
+	c.resolverAddrMu.RLock()
+	if addr, ok := c.resolverAddrCache[label]; ok && addr != nil {
+		c.resolverAddrMu.RUnlock()
+		return addr, nil
+	}
+	c.resolverAddrMu.RUnlock()
+
+	var addr *net.UDPAddr
+	if ip := net.ParseIP(conn.Resolver); ip != nil {
+		addr = &net.UDPAddr{IP: ip, Port: conn.ResolverPort}
+	} else {
+		resolved, err := net.ResolveUDPAddr("udp", label)
+		if err != nil {
+			return nil, err
+		}
+		addr = resolved
+	}
+
+	c.resolverAddrMu.Lock()
+	if existing, ok := c.resolverAddrCache[label]; ok && existing != nil {
+		c.resolverAddrMu.Unlock()
+		return existing, nil
+	}
+	c.resolverAddrCache[label] = addr
+	c.resolverAddrMu.Unlock()
+	return addr, nil
+}
+
 // now returns the current time.
 func (c *Client) now() time.Time {
 	if c != nil && c.nowFn != nil {
 		return c.nowFn()
 	}
 	return time.Now()
+}
+
+func (c *Client) bumpStreamSetVersion() {
+	if c == nil {
+		return
+	}
+	c.streamSetVersion.Add(1)
 }
 
 func (c *Client) SessionReady() bool {
@@ -492,6 +581,9 @@ func (c *Client) BuildConnectionMap() error {
 				Key:           key,
 				IsValid:       true,
 			})
+			if ip := net.ParseIP(resolver.IP); ip != nil {
+				c.resolverAddrCache[label] = &net.UDPAddr{IP: ip, Port: resolver.Port}
+			}
 		}
 	}
 

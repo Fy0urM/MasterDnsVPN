@@ -215,10 +215,10 @@ STREAM_FAILURE_PACKET_TTL_SECONDS = 120.0
 
 # ARQ timing / retry profile.
 ARQ_WINDOW_SIZE = 600
-ARQ_INITIAL_RTO_SECONDS = 0.5
-ARQ_MAX_RTO_SECONDS = 3.0
-ARQ_CONTROL_INITIAL_RTO_SECONDS = 0.4
-ARQ_CONTROL_MAX_RTO_SECONDS = 2.0
+ARQ_INITIAL_RTO_SECONDS = 1
+ARQ_MAX_RTO_SECONDS = 5.0
+ARQ_CONTROL_INITIAL_RTO_SECONDS = 0.5
+ARQ_CONTROL_MAX_RTO_SECONDS = 3.0
 ARQ_MAX_CONTROL_RETRIES = 300
 ARQ_INACTIVITY_TIMEOUT_SECONDS = 1800.0
 ARQ_DATA_PACKET_TTL_SECONDS = 2400.0
@@ -227,12 +227,12 @@ ARQ_MAX_DATA_RETRIES = 1200
 
 # Maximum out-of-order gap ahead of rcvNxt that can trigger STREAM_DATA_NACK.
 # 0 disables NACK generation entirely.
-# Keep this aligned with the client profile for predictable behavior.
-ARQ_DATA_NACK_MAX_GAP = 2
+# Keep this small so only near-miss gaps cause early resend requests.
+ARQ_DATA_NACK_MAX_GAP = 64
 
 # Minimum seconds between repeated NACKs for the same missing sequence number.
 # Clamped to [0.1s, 30s].
-ARQ_DATA_NACK_REPEAT_SECONDS = 2.0
+ARQ_DATA_NACK_REPEAT_SECONDS = 0.5
 
 ARQ_TERMINAL_DRAIN_TIMEOUT_SECONDS = 120.0
 ARQ_TERMINAL_ACK_WAIT_TIMEOUT_SECONDS = 90.0

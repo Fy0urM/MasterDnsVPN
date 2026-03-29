@@ -124,6 +124,13 @@ func (s *Stream_server) PushTXPacket(priority int, packetType uint8, sequenceNum
 	return true
 }
 
+func (s *Stream_server) NoteTXPacketDequeued(packet *serverStreamTXPacket) {
+	if s == nil || packet == nil || s.ARQ == nil {
+		return
+	}
+	s.ARQ.NoteTXPacketDequeued(packet.PacketType, packet.SequenceNum, packet.FragmentID)
+}
+
 func (s *Stream_server) RemoveQueuedData(sequenceNum uint16) bool {
 	if s == nil || s.TXQueue == nil {
 		return false

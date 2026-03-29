@@ -458,6 +458,7 @@ func (c *Client) removeStream(streamID uint16) {
 	s, ok := c.active_streams[streamID]
 	delete(c.active_streams, streamID)
 	c.streamsMu.Unlock()
+	c.bumpStreamSetVersion()
 
 	if ok {
 		s.Close()

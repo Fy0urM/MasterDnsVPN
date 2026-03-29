@@ -164,6 +164,7 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 	}
 	c.active_streams[streamID] = s
 	c.streamsMu.Unlock()
+	c.bumpStreamSetVersion()
 
 	if conn != nil && streamID != 0 {
 		switch c.cfg.ProtocolType {
@@ -257,8 +258,20 @@ func (s *Stream_client) PopNextTXPacket() (*clientStreamTXPacket, int, bool) {
 	packet, priority, ok := s.txQueue.Pop(func(p *clientStreamTXPacket) uint64 {
 		return Enums.PacketIdentityKey(s.StreamID, p.PacketType, p.SequenceNum, p.FragmentID)
 	})
+	if ok && packet != nil {
+		s.NoteTXPacketDequeued(packet)
+	}
 
 	return packet, priority, ok
+}
+
+func (s *Stream_client) NoteTXPacketDequeued(packet *clientStreamTXPacket) {
+	if s == nil || packet == nil {
+		return
+	}
+	if a, ok := s.Stream.(*arq.ARQ); ok && a != nil {
+		a.NoteTXPacketDequeued(packet.PacketType, packet.SequenceNum, packet.FragmentID)
+	}
 }
 
 // GetQueuedPacket checks if a packet exists in any priority queue in O(1).
@@ -336,6 +349,7 @@ func (s *Stream_client) finalizeAfterARQClose() {
 				delete(s.client.active_streams, s.StreamID)
 			}
 			s.client.streamsMu.Unlock()
+			s.client.bumpStreamSetVersion()
 		}
 
 		s.cleanupResources()
@@ -577,6 +591,7 @@ func (c *Client) InitVirtualStream0() {
 	s.Stream = a
 	c.active_streams[streamID] = s
 	a.Start()
+	c.bumpStreamSetVersion()
 
 	c.log.Debugf("🚀 <green>Virtual Stream 0 (Control Channel) Initialized.</green>")
 }
@@ -591,6 +606,7 @@ func (c *Client) CloseAllStreams() {
 	}
 	c.active_streams = make(map[uint16]*Stream_client)
 	c.streamsMu.Unlock()
+	c.bumpStreamSetVersion()
 
 	for _, s := range streams {
 		if s != nil {

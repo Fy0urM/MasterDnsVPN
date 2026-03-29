@@ -80,6 +80,7 @@ func (c *Client) resetRuntimeBindings(resetSession bool) {
 	c.streamsMu.Lock()
 	c.last_stream_id = 0
 	c.streamsMu.Unlock()
+	c.bumpStreamSetVersion()
 
 	c.dnsResponses = fragmentStore.New[dnsFragmentKey](c.cfg.DNSResponseFragmentStoreCap)
 	if c.localDNSCache != nil {
@@ -406,19 +407,28 @@ drainRX:
 func (c *Client) asyncWriterWorker(ctx context.Context, id int, conn *net.UDPConn) {
 	defer c.asyncWG.Done()
 	c.log.Debugf("\U0001F680 <green>Writer Worker <cyan>#%d</cyan> started</green>", id)
+	var lastDeadline time.Time
+	refreshWindow := c.tunnelPacketTimeout / 2
+	if refreshWindow < 250*time.Millisecond {
+		refreshWindow = 250 * time.Millisecond
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case pkt := <-c.txChannel:
 			c.signalTxSpace()
-			addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", pkt.conn.Resolver, pkt.conn.ResolverPort))
+			addr, err := c.getResolverUDPAddr(pkt.conn)
 			if err != nil {
 				continue
 			}
 
 			if c.tunnelPacketTimeout > 0 {
-				_ = conn.SetWriteDeadline(time.Now().Add(c.tunnelPacketTimeout))
+				now := time.Now()
+				if lastDeadline.IsZero() || now.Add(refreshWindow).After(lastDeadline) {
+					lastDeadline = now.Add(c.tunnelPacketTimeout)
+					_ = conn.SetWriteDeadline(lastDeadline)
+				}
 			}
 
 			sentAt := time.Now()
@@ -498,12 +508,15 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 	// 1. Extract VPN Packet from DNS Response
 	vpnPacket, err := DnsParser.ExtractVPNResponse(data, c.responseMode == mtuProbeBase64Reply)
 	if err != nil {
+		c.log.Warnf("\U0001F6A8 <red>Failed to parse VPN packet from DNS response: %v</red>", err)
 		return
 	}
 
-	// if vpnPacket.PacketType != Enums.PACKET_PONG {
-	// 	c.log.Warnf("<green>Receiving Packet, Packet: %s | Session %d | Payload Len(%d) | Stream: %d | Seq: %d | Fg: %d | TF: %d</green>", Enums.PacketTypeName(vpnPacket.PacketType), vpnPacket.SessionID, len(vpnPacket.Payload), vpnPacket.StreamID, vpnPacket.SequenceNum, vpnPacket.FragmentID, vpnPacket.TotalFragments)
+	// packedSummary := ""
+	// if vpnPacket.PacketType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
+	// 	packedSummary = " | " + VpnProto.DescribePackedControlBlocks(vpnPacket.Payload, 4)
 	// }
+	// c.logInboundPacket(vpnPacket.PacketType, vpnPacket.SessionID, len(vpnPacket.Payload), vpnPacket.StreamID, vpnPacket.SequenceNum, vpnPacket.FragmentID, vpnPacket.TotalFragments, packedSummary)
 	c.trackResolverSuccess(data, addr, time.Now())
 
 	// 2. Notify activity monitor (PingManager)

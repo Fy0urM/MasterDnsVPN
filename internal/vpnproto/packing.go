@@ -9,6 +9,8 @@ package vpnproto
 
 import (
 	Enums "masterdnsvpn-go/internal/enums"
+	"strconv"
+	"strings"
 )
 
 // PackedControlBlockSize is the fixed size of each block inside a PACKET_PACKED_CONTROL_BLOCKS (Type 14)
@@ -92,4 +94,60 @@ func ForEachPackedControlBlock(payload []byte, yield func(ptype uint8, streamID 
 			break
 		}
 	}
+}
+
+// DescribePackedControlBlocks returns a compact summary suitable for logs.
+// Example: "Blocks(4): PACKET_STREAM_DATA_ACK x2, PACKET_STREAM_DATA_NACK x1, PACKET_STREAM_CLOSE_WRITE_ACK x1"
+func DescribePackedControlBlocks(payload []byte, maxKinds int) string {
+	if len(payload) == 0 {
+		return "Blocks(0)"
+	}
+	if maxKinds <= 0 {
+		maxKinds = 4
+	}
+
+	order := make([]uint8, 0, maxKinds)
+	counts := make(map[uint8]int)
+	totalBlocks := 0
+
+	ForEachPackedControlBlock(payload, func(ptype uint8, _ uint16, _ uint16, _ uint8, _ uint8) bool {
+		totalBlocks++
+		if _, exists := counts[ptype]; !exists {
+			order = append(order, ptype)
+		}
+		counts[ptype]++
+		return true
+	})
+
+	if totalBlocks == 0 {
+		return "Blocks(0)"
+	}
+
+	var b strings.Builder
+	b.WriteString("Blocks(")
+	b.WriteString(strconv.Itoa(totalBlocks))
+	b.WriteString("): ")
+
+	limit := len(order)
+	if limit > maxKinds {
+		limit = maxKinds
+	}
+
+	for i := 0; i < limit; i++ {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		ptype := order[i]
+		b.WriteString(Enums.PacketTypeName(ptype))
+		b.WriteString(" x")
+		b.WriteString(strconv.Itoa(counts[ptype]))
+	}
+
+	if len(order) > limit {
+		b.WriteString(", +")
+		b.WriteString(strconv.Itoa(len(order) - limit))
+		b.WriteString(" more types")
+	}
+
+	return b.String()
 }

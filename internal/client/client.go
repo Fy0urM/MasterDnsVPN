@@ -44,6 +44,8 @@ type Client struct {
 	udpBufferPool       sync.Pool
 	resolverConnsMu     sync.Mutex
 	resolverConns       map[string]chan *net.UDPConn
+	resolverAddrMu      sync.RWMutex
+	resolverAddrCache   map[string]*net.UDPAddr
 	resolverStatsMu     sync.Mutex
 	resolverPending     map[resolverSampleKey]resolverSample
 	resolverHealthMu    sync.Mutex
@@ -114,6 +116,7 @@ type Client struct {
 	streamsMu             sync.RWMutex
 	active_streams        map[uint16]*Stream_client
 	last_stream_id        uint16
+	streamSetVersion      atomic.Uint64
 	orphanQueue           *mlq.MultiLevelQueue[VpnProto.Packet]
 	recentlyClosedMu      sync.Mutex
 	recentlyClosedStreams map[uint16]time.Time
@@ -218,6 +221,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 			},
 		},
 		resolverConns:                         make(map[string]chan *net.UDPConn),
+		resolverAddrCache:                     make(map[string]*net.UDPAddr),
 		resolverPending:                       make(map[resolverSampleKey]resolverSample),
 		resolverHealth:                        make(map[string]*resolverHealthState),
 		resolverRecheck:                       make(map[string]resolverRecheckState),

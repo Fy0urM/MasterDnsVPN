@@ -32,6 +32,9 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 	defer c.asyncWG.Done()
 
 	var rrCursor int32 = -1
+	var cachedVersion uint64
+	var cachedIDs []int32
+	var cachedStreams map[uint16]*Stream_client
 	idlePoll := c.cfg.DispatcherIdlePollInterval()
 	idleTimer := time.NewTimer(idlePoll)
 	defer idleTimer.Stop()
@@ -56,18 +59,28 @@ func (c *Client) asyncStreamDispatcher(ctx context.Context) {
 
 dispatchLoop:
 	for {
-		c.streamsMu.RLock()
-		streamCount := len(c.active_streams)
-		ids := make([]int32, 0, streamCount+1)
-		streams := make(map[uint16]*Stream_client, streamCount)
-		for id, stream := range c.active_streams {
-			ids = append(ids, int32(id))
-			streams[id] = stream
+		currentVersion := c.streamSetVersion.Load()
+		if currentVersion != cachedVersion || cachedIDs == nil || cachedStreams == nil {
+			c.streamsMu.RLock()
+			streamCount := len(c.active_streams)
+			ids := make([]int32, 0, streamCount+1)
+			streams := make(map[uint16]*Stream_client, streamCount)
+			for id, stream := range c.active_streams {
+				ids = append(ids, int32(id))
+				streams[id] = stream
+			}
+			c.streamsMu.RUnlock()
+			sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+			cachedIDs = ids
+			cachedStreams = streams
+			cachedVersion = currentVersion
 		}
-		c.streamsMu.RUnlock()
+
+		ids := cachedIDs
+		streams := cachedStreams
 
 		if c.orphanQueue != nil && c.orphanQueue.Size() > 0 {
-			ids = append(ids, -1)
+			ids = append(ids[:len(ids):len(ids)], -1)
 		}
 
 		if len(ids) == 0 {
@@ -76,8 +89,6 @@ dispatchLoop:
 			}
 			continue
 		}
-
-		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 
 		var selected *Stream_client
 		var peekedItem *clientStreamTXPacket
@@ -248,6 +259,7 @@ dispatchLoop:
 					if !poppedOK {
 						break
 					}
+					selected.NoteTXPacketDequeued(popped)
 					payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, selected.StreamID, popped.SequenceNum, popped.FragmentID, popped.TotalFragments)
 					blocks++
 					selected.ReleaseTXPacket(popped)
@@ -305,6 +317,7 @@ dispatchLoop:
 						if !poppedOK {
 							break
 						}
+						otherStream.NoteTXPacketDequeued(popped)
 						payload = VpnProto.AppendPackedControlBlock(payload, popped.PacketType, uint16(otherID), popped.SequenceNum, popped.FragmentID, popped.TotalFragments)
 						blocks++
 						otherStream.ReleaseTXPacket(popped)
@@ -331,6 +344,37 @@ dispatchLoop:
 		c.pingManager.NotifyPacket(finalPacket.packetType, false)
 		finalPacket.streamID = selectedStreamID
 
+		opts := VpnProto.BuildOptions{
+			SessionID:     c.sessionID,
+			SessionCookie: c.sessionCookie,
+			PacketType:    finalPacket.packetType,
+			CompressionType: func() uint8 {
+				if wasPacked {
+					return c.uploadCompression
+				}
+				return item.CompressionType
+			}(),
+			Payload: finalPacket.payload,
+		}
+
+		if wasPacked {
+			opts.StreamID = 0
+		} else {
+			opts.StreamID = selectedStreamID
+			opts.SequenceNum = item.SequenceNum
+			opts.FragmentID = item.FragmentID
+			opts.TotalFragments = item.TotalFragments
+		}
+
+		encoded, err := c.buildEncodedAutoWithCompressionTrace(opts)
+		if err != nil {
+			if !wasPacked && selected != nil {
+				selected.ReleaseTXPacket(item)
+			}
+			continue dispatchLoop
+		}
+
+		packetByDomain := make(map[string][]byte, len(conns))
 		// var isLogged bool = false
 		for _, conn := range conns {
 			domain := conn.Domain
@@ -338,36 +382,13 @@ dispatchLoop:
 				domain = c.cfg.Domains[0]
 			}
 
-			opts := VpnProto.BuildOptions{
-				SessionID:     c.sessionID,
-				SessionCookie: c.sessionCookie,
-				PacketType:    finalPacket.packetType,
-				CompressionType: func() uint8 {
-					if wasPacked {
-						return c.uploadCompression
-					}
-					return item.CompressionType
-				}(),
-				Payload: finalPacket.payload,
-			}
-
-			if wasPacked {
-				opts.StreamID = 0
-			} else {
-				opts.StreamID = selectedStreamID
-				opts.SequenceNum = item.SequenceNum
-				opts.FragmentID = item.FragmentID
-				opts.TotalFragments = item.TotalFragments
-			}
-
-			encoded, err := c.buildEncodedAutoWithCompressionTrace(opts)
-			if err != nil {
-				continue
-			}
-
-			dnsPacket, err := buildTunnelTXTQuestion(domain, encoded)
-			if err != nil {
-				continue
+			dnsPacket, ok := packetByDomain[domain]
+			if !ok {
+				dnsPacket, err = buildTunnelTXTQuestion(domain, encoded)
+				if err != nil {
+					continue
+				}
+				packetByDomain[domain] = dnsPacket
 			}
 
 			pkt := finalPacket
@@ -377,7 +398,11 @@ dispatchLoop:
 			select {
 			case c.txChannel <- pkt:
 				// if !isLogged && pkt.packetType != Enums.PACKET_PING {
-				// 	c.log.Warnf("<cyan>Sending Packet, Packet: Packet: %s | Session %d | Payload Len(%d) | Stream: %d | Seq: %d | Fg: %d | TF: %d</cyan>", Enums.PacketTypeName(opts.PacketType), opts.SessionID, len(opts.Payload), opts.StreamID, opts.SequenceNum, opts.FragmentID, opts.TotalFragments)
+				// 	packedSummary := ""
+				// 	if opts.PacketType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
+				// 		packedSummary = " | " + VpnProto.DescribePackedControlBlocks(opts.Payload, 4)
+				// 	}
+				// 	c.logOutboundPacket(opts.PacketType, opts.SessionID, len(opts.Payload), opts.StreamID, opts.SequenceNum, opts.FragmentID, opts.TotalFragments, packedSummary)
 				// }
 				// isLogged = true
 			default:
