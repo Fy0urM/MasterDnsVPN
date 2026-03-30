@@ -522,7 +522,7 @@ sudo journalctl -u masterdnsvpn-client -f
 
 ---
 
-## بخش ۳.۵: جدول متغیرهای پیکربندی سرور (`server_config.toml`) 📖
+## بخش ۳.۵: 📖 جدول متغیرهای پیکربندی سرور (`server_config.toml`)
 
 ### سیاست تونل
 
@@ -630,9 +630,9 @@ sudo journalctl -u masterdnsvpn-client -f
 
 ---
 
-## بخش ۳.۶: درک بهتر از MTU و تنظیمات طلایی برای اجرای سریع ⚡
+## بخش ۳.۶: ⚡ درک بهتر از MTU و تنظیمات طلایی برای اجرای سریع 
 
-نسخه فعلی Go همچنان به‌شدت به MTU مناسب وابسته است. اگر MTU را خیلی بالا بگیرید:
+این پروژه به‌شدت به MTU مناسب وابسته است. اگر MTU را خیلی بالا بگیرید:
 
 - resolverهای بیشتری fail می‌شوند
 - startup طولانی‌تر می‌شود
@@ -728,7 +728,7 @@ sudo systemctl restart systemd-resolved
 
 ```mermaid
 graph TD
-    subgraph Client_Side ["🖥️ سیستم کاربر (Client - Go)"]
+    subgraph Client_Side ["🖥️ سیستم کاربر (Client)"]
         App["📱 برنامه‌ها (مرورگر، تلگرام و...)"]
         Proxy["🧦 پروکسی محلی SOCKS5 / TCP"]
         LDNS["📛 Local DNS (اختیاری)"]
@@ -742,7 +742,7 @@ graph TD
         RN["📡 Resolver N"]
     end
 
-    subgraph Server_Side ["🖥️ سرور خارج از کشور (Server - Go)"]
+    subgraph Server_Side ["🖥️ سرور خارج از کشور (Server)"]
         UDP["📥 UDP Listener + Request Workers"]
         Sessions["🧠 Session Store + Deferred Workers"]
         ServerARQ["🔄 Server ARQ + Packed Control Blocks"]
@@ -773,9 +773,9 @@ graph TD
 ```mermaid
 sequenceDiagram
     participant App as 📱 برنامه کاربر
-    participant Client as 🖥️ کلاینت Go
+    participant Client as 🖥️ کلاینت
     participant DNS as 📡 Resolverها
-    participant Server as 🖥️ سرور Go
+    participant Server as 🖥️ سرور
     participant Target as 🌐 مقصد نهایی
 
     App->>Client: ایجاد اتصال SOCKS5 / TCP
