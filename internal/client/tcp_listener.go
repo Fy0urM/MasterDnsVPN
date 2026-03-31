@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"masterdnsvpn-go/internal/netutil"
 )
 
 type TCPListener struct {
@@ -93,6 +95,12 @@ func (l *TCPListener) Start(ctx context.Context, ip string, port int) error {
 				go l.handleConnection(ctx, conn, l.protocolType)
 			}
 		}(listener)
+	}
+
+	if l.client != nil && l.client.log != nil {
+		if hint := netutil.FormatListenHint(ip, port); hint != "" {
+			l.client.log.Infof("🌐 <green>%s Proxy %s</green>", l.protocolType, hint)
+		}
 	}
 
 	return nil
