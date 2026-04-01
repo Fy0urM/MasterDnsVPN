@@ -910,32 +910,7 @@ func (r *sessionRecord) activeStreamSnapshot() ([]int32, []*Stream_server) {
 	return r.activeStreamSnapshotIDs, r.activeStreamSnapshotStreams
 }
 
-func (r *sessionRecord) activeResponseSnapshot() ([]int32, []*Stream_server) {
-	if r == nil || r.isClosed() {
-		return nil, nil
-	}
 
-	activeIDs, activeStreams := r.activeStreamSnapshot()
-	if len(activeIDs) == 0 {
-		return nil, nil
-	}
-
-	ids := make([]int32, 0, len(activeIDs))
-	streams := make([]*Stream_server, 0, len(activeStreams))
-	for i, id := range activeIDs {
-		stream := activeStreams[i]
-		if stream == nil || stream.TXQueue == nil {
-			continue
-		}
-		if stream.FastTXQueueSize() == 0 {
-			continue
-		}
-		ids = append(ids, id)
-		streams = append(streams, stream)
-	}
-
-	return ids, streams
-}
 
 func (r *sessionRecord) closeAllStreams(reason string) {
 	if r == nil {

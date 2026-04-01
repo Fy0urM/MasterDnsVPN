@@ -29,7 +29,6 @@ type Stream_server struct {
 	SessionID uint8
 	ARQ       *arq.ARQ
 	TXQueue   *mlq.MultiLevelQueue[*serverStreamTXPacket]
-	RXQueue   *mlq.MultiLevelQueue[*serverInboundPacket]
 
 	Status       string
 	CreatedAt    time.Time
@@ -42,15 +41,9 @@ type Stream_server struct {
 	Connected       bool
 	onClosed        func(uint16, time.Time, string)
 	log             arq.Logger
-	rxSignal        chan struct{}
-	rxWorkerMu      sync.Mutex
-	rxWorkerCtx     context.Context
+	
+	rxChan          chan *serverInboundPacket
 	rxWorkerCancel  context.CancelFunc
-	rxWorkerRunning bool
-
-	// Tracking for deduplication (similar to Python's _track_stream_packet_once)
-	// Key: packetType << 16 | sequenceNum
-	// For data packets, we might also want to track by sequence if multiple types exist.
 }
 
 type serverInboundPacket struct {
@@ -68,12 +61,11 @@ func NewStreamServer(streamID uint16, sessionID uint8, arqConfig arq.Config, loc
 		ID:           streamID,
 		SessionID:    sessionID,
 		TXQueue:      mlq.New[*serverStreamTXPacket](queueInitialCapacity),
-		RXQueue:      mlq.New[*serverInboundPacket](queueInitialCapacity),
 		Status:       "PENDING",
 		CreatedAt:    time.Now(),
 		LastActivity: time.Now(),
 		log:          logger,
-		rxSignal:     make(chan struct{}, 1),
+		rxChan:       make(chan *serverInboundPacket, 16384),
 	}
 
 	if s.log == nil {
@@ -82,16 +74,18 @@ func NewStreamServer(streamID uint16, sessionID uint8, arqConfig arq.Config, loc
 
 	s.ARQ = arq.NewARQ(streamID, sessionID, s, localConn, mtu, s.log, arqConfig)
 	s.ARQ.Start()
+	
+	ctx, cancel := context.WithCancel(context.Background())
+	s.rxWorkerCancel = cancel
+	go s.runInboundWorker(ctx)
+	
 	return s
 }
 
 func (s *Stream_server) enqueueInboundData(packetType uint8, sequenceNum uint16, fragmentID uint8, payload []byte) bool {
-	if s == nil || s.RXQueue == nil {
+	if s == nil || s.rxChan == nil {
 		return false
 	}
-
-	priority := Enums.NormalizePacketPriority(packetType, Enums.DefaultPacketPriority(packetType))
-	key := Enums.PacketIdentityKey(s.ID, Enums.PACKET_STREAM_DATA, sequenceNum, fragmentID)
 
 	pkt := &serverInboundPacket{
 		PacketType:  packetType,
@@ -100,134 +94,40 @@ func (s *Stream_server) enqueueInboundData(packetType uint8, sequenceNum uint16,
 		Payload:     payload,
 	}
 
-	s.rxQueueMu.Lock()
-	ok := s.RXQueue.Push(priority, key, pkt)
-	s.rxQueueMu.Unlock()
-	if !ok {
+	select {
+	case s.rxChan <- pkt:
+		return true
+	default:
 		return false
 	}
-
-	select {
-	case s.rxSignal <- struct{}{}:
-	default:
-	}
-
-	s.startInboundWorkerIfReady()
-	return true
-}
-
-func (s *Stream_server) popInboundData() (*serverInboundPacket, bool) {
-	if s == nil || s.RXQueue == nil {
-		return nil, false
-	}
-
-	s.rxQueueMu.Lock()
-	defer s.rxQueueMu.Unlock()
-
-	pkt, _, ok := s.RXQueue.Pop(func(p *serverInboundPacket) uint64 {
-		return Enums.PacketIdentityKey(s.ID, Enums.PACKET_STREAM_DATA, p.SequenceNum, p.FragmentID)
-	})
-	return pkt, ok
-}
-
-func (s *Stream_server) clearInboundQueue() {
-	if s == nil || s.RXQueue == nil {
-		return
-	}
-
-	s.rxQueueMu.Lock()
-	s.RXQueue.Clear(nil)
-	s.rxQueueMu.Unlock()
 }
 
 func (s *Stream_server) shutdownInboundProcessing() {
 	if s == nil {
 		return
 	}
-	s.stopInboundWorker()
-	s.clearInboundQueue()
-}
-
-func (s *Stream_server) startInboundWorkerIfReady() {
-	if s == nil {
-		return
-	}
-
-	s.mu.RLock()
-	ready := s.Connected && s.ARQ != nil
-	s.mu.RUnlock()
-	if !ready {
-		return
-	}
-
-	s.rxWorkerMu.Lock()
-	defer s.rxWorkerMu.Unlock()
-	if s.rxWorkerRunning {
-		return
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.rxWorkerCtx = ctx
-	s.rxWorkerCancel = cancel
-	s.rxWorkerRunning = true
-
-	go s.runInboundWorker(ctx)
-}
-
-func (s *Stream_server) stopInboundWorker() {
-	if s == nil {
-		return
-	}
-
-	s.rxWorkerMu.Lock()
-	cancel := s.rxWorkerCancel
-	s.rxWorkerCancel = nil
-	s.rxWorkerCtx = nil
-	s.rxWorkerRunning = false
-	s.rxWorkerMu.Unlock()
-
-	if cancel != nil {
-		cancel()
+	if s.rxWorkerCancel != nil {
+		s.rxWorkerCancel()
+		s.rxWorkerCancel = nil
 	}
 }
 
 func (s *Stream_server) runInboundWorker(ctx context.Context) {
-	defer func() {
-		s.rxWorkerMu.Lock()
-		if s.rxWorkerCtx == ctx {
-			s.rxWorkerCtx = nil
-			s.rxWorkerCancel = nil
-			s.rxWorkerRunning = false
-		}
-		s.rxWorkerMu.Unlock()
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-s.rxSignal:
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			pkt, ok := s.popInboundData()
+		case pkt, ok := <-s.rxChan:
 			if !ok {
-				break
+				return
 			}
-
+			
 			s.mu.RLock()
 			arqInst := s.ARQ
-			connected := s.Connected
 			s.mu.RUnlock()
-			if !connected || arqInst == nil || arqInst.IsClosed() || arqInst.IsReset() {
-				s.clearInboundQueue()
-				return
+			
+			if arqInst == nil || arqInst.IsClosed() || arqInst.IsReset() {
+				return // we can exit entirely or just continue? Just exit because ARQ is dead.
 			}
 
 			_ = arqInst.ReceiveData(pkt.SequenceNum, pkt.Payload)
@@ -434,7 +334,7 @@ func (s *Stream_server) attachUpstreamConn(conn io.ReadWriteCloser, host string,
 		s.Status = status
 	}
 	s.LastActivity = time.Now()
-	go s.startInboundWorkerIfReady()
+	// worker is already started in NewStreamServer
 	return true
 }
 

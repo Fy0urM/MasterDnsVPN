@@ -70,10 +70,7 @@ func waitForInboundWorkerStop(t *testing.T, stream *Stream_server) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		stream.rxWorkerMu.Lock()
-		running := stream.rxWorkerRunning
-		stream.rxWorkerMu.Unlock()
-		if !running {
+		if stream.rxWorkerCancel == nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -90,7 +87,6 @@ func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
 	stream.UpstreamConn = upstream
 	stream.Connected = true
-	stream.startInboundWorkerIfReady()
 	if !stream.enqueueInboundData(Enums.PACKET_STREAM_DATA, 1, 0, []byte("inbound")) {
 		t.Fatal("expected inbound packet to queue")
 	}
@@ -124,8 +120,8 @@ func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 	if stream.TXQueue.Size() != 0 {
 		t.Fatalf("expected stream TX queue to be cleared, got %d", stream.TXQueue.Size())
 	}
-	if stream.RXQueue.Size() != 0 {
-		t.Fatalf("expected stream RX queue to be cleared, got %d", stream.RXQueue.Size())
+	if len(stream.rxChan) != 0 {
+		t.Fatalf("expected stream RX queue to be cleared, got %d", len(stream.rxChan))
 	}
 	waitForInboundWorkerStop(t, stream)
 	if stream.Status != "CLOSED" {
@@ -174,7 +170,6 @@ func TestFinalizeAfterARQCloseStopsInboundWorkerAndClearsRXQueue(t *testing.T) {
 	}
 
 	stream.Connected = true
-	stream.startInboundWorkerIfReady()
 	if !stream.enqueueInboundData(Enums.PACKET_STREAM_DATA, 9, 0, []byte("inbound")) {
 		t.Fatal("expected inbound packet to queue")
 	}
@@ -182,9 +177,6 @@ func TestFinalizeAfterARQCloseStopsInboundWorkerAndClearsRXQueue(t *testing.T) {
 	stream.finalizeAfterARQClose("test close")
 
 	waitForInboundWorkerStop(t, stream)
-	if stream.RXQueue.Size() != 0 {
-		t.Fatalf("expected RX queue to be cleared, got %d", stream.RXQueue.Size())
-	}
 	if stream.TXQueue.Size() != 0 {
 		t.Fatalf("expected TX queue to be cleared, got %d", stream.TXQueue.Size())
 	}

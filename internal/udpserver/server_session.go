@@ -308,7 +308,7 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 	rrStreamID := record.RRStreamID
 	record.mu.Unlock()
 
-	readyIDs, readyStreams := record.activeResponseSnapshot()
+	readyIDs, readyStreams := record.activeStreamSnapshot()
 	hasOrphan := record.OrphanQueue != nil && record.OrphanQueue.FastSize() > 0
 	totalCandidates := len(readyIDs)
 
@@ -366,7 +366,7 @@ func (s *Server) dequeueSessionResponse(sessionID uint8, now time.Time) (*VpnPro
 				ok = true
 			}
 		} else {
-			if stream == nil || stream.TXQueue == nil {
+			if stream == nil || stream.TXQueue == nil || stream.FastTXQueueSize() == 0 {
 				continue
 			}
 			if stream.ARQ != nil && stream.ARQ.IsClosed() {
@@ -458,7 +458,7 @@ func (s *Server) packControlBlocks(record *sessionRecord, first *serverStreamTXP
 	payload = VpnProto.AppendPackedControlBlock(payload, first.PacketType, initialStreamID, first.SequenceNum, first.FragmentID, first.TotalFragments)
 	blocks := 1
 
-	readyIDs, readyStreams := record.activeResponseSnapshot()
+	readyIDs, readyStreams := record.activeStreamSnapshot()
 	hasOrphan := record.OrphanQueue != nil && record.OrphanQueue.FastSize() > 0
 
 	processID := func(id int32, stream *Stream_server) bool {

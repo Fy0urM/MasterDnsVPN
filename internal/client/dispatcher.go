@@ -423,29 +423,14 @@ dispatchLoop:
 			pkt.payload = dnsPacket
 			pkt.sequenceNum = item.SequenceNum
 
-			for {
-				select {
-				case c.txChannel <- pkt:
-					goto enqueued
-				case <-ctx.Done():
-					if !wasPacked && selected != nil {
-						selected.ReleaseTXPacket(item)
-					}
-					return
-				case <-c.txSpaceSignal:
-				case <-idleTimer.C:
+			select {
+			case c.txChannel <- pkt:
+			case <-ctx.Done():
+				if !wasPacked && selected != nil {
+					selected.ReleaseTXPacket(item)
 				}
-
-				if !idleTimer.Stop() {
-					select {
-					case <-idleTimer.C:
-					default:
-					}
-				}
-				idleTimer.Reset(idlePoll)
+				return
 			}
-
-		enqueued:
 		}
 
 		if !wasPacked && selected != nil {
