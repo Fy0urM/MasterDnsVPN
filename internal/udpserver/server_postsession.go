@@ -141,6 +141,7 @@ func (s *Server) consumeInboundStreamAck(vpnPacket VpnProto.Packet, stream *Stre
 
 	if _, ok := Enums.GetPacketCloseStream(vpnPacket.PacketType); handledAck && ok {
 		if stream.ARQ.IsClosed() {
+			stream.shutdownInboundProcessing()
 			stream.ClearTXQueue()
 			if record, exists := s.sessions.Get(vpnPacket.SessionID); exists && record != nil {
 				record.deactivateStream(vpnPacket.StreamID)
@@ -790,16 +791,18 @@ func (s *Server) handleStreamDataRequest(vpnPacket VpnProto.Packet) bool {
 	}
 
 	if stream.ARQ == nil {
+		stream.shutdownInboundProcessing()
 		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
 		return true
 	}
 
 	if stream.ARQ.IsClosed() || stream.ARQ.IsReset() {
+		stream.shutdownInboundProcessing()
 		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
 		return true
 	}
 
-	_ = stream.ARQ.ReceiveData(vpnPacket.SequenceNum, vpnPacket.Payload)
+	stream.enqueueInboundData(vpnPacket.PacketType, vpnPacket.SequenceNum, vpnPacket.FragmentID, vpnPacket.Payload)
 	return true
 }
 
@@ -872,12 +875,16 @@ func (s *Server) handleStreamRSTRequest(vpnPacket VpnProto.Packet) bool {
 	stream, ok := record.getStream(vpnPacket.StreamID)
 	if ok && stream != nil {
 		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST_ACK, vpnPacket.StreamID, vpnPacket.SequenceNum)
+
 		if stream.ARQ != nil && stream.ARQ.IsClosed() {
+			stream.shutdownInboundProcessing()
 			stream.ClearTXQueue()
 			record.deactivateStream(vpnPacket.StreamID)
 			s.clearDeferredPacketsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
 			return true
 		}
+
+		stream.shutdownInboundProcessing()
 		stream.ClearTXQueue()
 		record.deactivateStream(vpnPacket.StreamID)
 		s.clearDeferredPacketsForStream(vpnPacket.SessionID, vpnPacket.StreamID)

@@ -25,10 +25,11 @@ import (
 const clientRXDropLogInterval = 2 * time.Second
 
 type asyncPacket struct {
-	conn       Connection
-	payload    []byte
-	packetType uint8
-	streamID   uint16
+	conn        Connection
+	payload     []byte
+	packetType  uint8
+	streamID    uint16
+	sequenceNum uint16
 }
 
 type asyncReadPacket struct {
@@ -552,12 +553,12 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 	if err != nil {
 		if errors.Is(err, DnsParser.ErrTXTAnswerMissing) {
 			receivedAt := time.Now()
-			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			if parsed, parseErr := DnsParser.ParsePacketLite(data); parseErr == nil && parsed.Header.RCode != 0 {
 				c.trackResolverFailure(data, addr, receivedAt)
 			} else {
 				c.trackResolverSuccess(data, addr, receivedAt)
 			}
+			// summary := DnsParser.DescribeResponseWithoutTunnelPayload(data)
 			// c.log.Debugf("DNS response from %v had no tunnel TXT payload | %s", addr, summary)
 			return
 		}
@@ -565,12 +566,15 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	// packedSummary := ""
-	// if vpnPacket.PacketType == Enums.PACKET_PACKED_CONTROL_BLOCKS {
-	// 	packedSummary = " | " + VpnProto.DescribePackedControlBlocks(vpnPacket.Payload, 4)
-	// }
-	// c.logInboundPacket(vpnPacket.PacketType, vpnPacket.SessionID, len(vpnPacket.Payload), vpnPacket.StreamID, vpnPacket.SequenceNum, vpnPacket.FragmentID, vpnPacket.TotalFragments, packedSummary)
 	c.trackResolverSuccess(data, addr, time.Now())
+	// if c.log != nil && c.log.Enabled(logger.LevelDebug) && vpnPacket.PacketType != Enums.PACKET_PONG {
+	// 	if vpnPacket.PacketType == Enums.PACKET_STREAM_DATA_ACK {
+	// 		c.log.Debugf("Client received ACK | Stream: %d | Seq: %d", vpnPacket.StreamID, vpnPacket.SequenceNum)
+	// 	} else {
+	// 		c.log.Debugf("Client received inbound VPN packet | Packet: %s | Stream: %d | Seq: %d | Payload: %d | Frag: %d/%d",
+	// 			Enums.PacketTypeName(vpnPacket.PacketType), vpnPacket.StreamID, vpnPacket.SequenceNum, len(vpnPacket.Payload), vpnPacket.FragmentID, vpnPacket.TotalFragments)
+	// 	}
+	// }
 
 	// 2. Notify activity monitor (PingManager)
 	c.NotifyPacket(vpnPacket.PacketType, true)

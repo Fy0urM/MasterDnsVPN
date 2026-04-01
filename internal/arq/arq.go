@@ -59,11 +59,11 @@ type Logger interface {
 	Errorf(format string, args ...any)
 }
 
-type dummyLogger struct{}
+type DummyLogger struct{}
 
-func (d *dummyLogger) Debugf(f string, a ...any) {}
-func (d *dummyLogger) Infof(f string, a ...any)  {}
-func (d *dummyLogger) Errorf(f string, a ...any) {}
+func (d *DummyLogger) Debugf(f string, a ...any) {}
+func (d *DummyLogger) Infof(f string, a ...any)  {}
+func (d *DummyLogger) Errorf(f string, a ...any) {}
 
 type arqDataItem struct {
 	Data            []byte
@@ -195,13 +195,15 @@ type ARQ struct {
 	dataAdaptiveRTO          adaptiveRTOState
 	controlAdaptiveRTO       adaptiveRTOState
 	dataNackMaxGap           int
+	dataNackInitialDelay     time.Duration
 	dataNackRepeatInterval   time.Duration
 
 	// Virtual streams do not emit local close side effects.
 	isVirtual bool
 
-	dataNackMu       sync.Mutex
-	lastDataNackSent map[uint16]time.Time
+	dataNackMu        sync.Mutex
+	firstDataNackSeen map[uint16]time.Time
+	lastDataNackSent  map[uint16]time.Time
 
 	// Concurrency
 	ctx         context.Context
@@ -232,7 +234,7 @@ const (
 	ioRetryBackoff         = 100 * time.Millisecond
 	ioTransientReadBudget  = 3 * time.Second
 	ioTransientWriteBudget = 3
-	ioReadMaxPackets       = 5
+	ioReadMaxPackets       = 1
 )
 
 func classifyIOError(err error) ioErrorClass {
@@ -265,25 +267,26 @@ func classifyIOError(err error) ioErrorClass {
 
 // Config represents the extensive ARQ tuning configuration identically ported from Python
 type Config struct {
-	WindowSize               int
-	RTO                      float64
-	MaxRTO                   float64
-	IsVirtual                bool
-	StartPaused              bool
-	EnableControlReliability bool
-	ControlRTO               float64
-	ControlMaxRTO            float64
-	ControlMaxRetries        int
-	InactivityTimeout        float64
-	DataPacketTTL            float64
-	MaxDataRetries           int
-	ControlPacketTTL         float64
-	DataNackMaxGap           int
-	DataNackRepeatSeconds    float64
-	TerminalDrainTimeout     float64
-	TerminalAckWaitTimeout   float64
-	CompressionType          uint8
-	IsClient                 bool
+	WindowSize                  int
+	RTO                         float64
+	MaxRTO                      float64
+	IsVirtual                   bool
+	StartPaused                 bool
+	EnableControlReliability    bool
+	ControlRTO                  float64
+	ControlMaxRTO               float64
+	ControlMaxRetries           int
+	InactivityTimeout           float64
+	DataPacketTTL               float64
+	MaxDataRetries              int
+	ControlPacketTTL            float64
+	DataNackMaxGap              int
+	DataNackInitialDelaySeconds float64
+	DataNackRepeatSeconds       float64
+	TerminalDrainTimeout        float64
+	TerminalAckWaitTimeout      float64
+	CompressionType             uint8
+	IsClient                    bool
 }
 
 type CloseOptions struct {
@@ -317,7 +320,7 @@ func (a *ARQ) HasPendingSequence(sn uint16) bool {
 // NewARQ instantiates a pristine reliable streaming overlay suitable for client or server
 func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn io.ReadWriteCloser, mtu int, logger Logger, cfg Config) *ARQ {
 	if logger == nil {
-		logger = &dummyLogger{}
+		logger = &DummyLogger{}
 	}
 
 	windowSize := max(cfg.WindowSize, 300)
@@ -356,11 +359,13 @@ func NewARQ(streamID uint16, sessionID uint8, enqueuer PacketEnqueuer, localConn
 		controlMaxRetries:        maxI(5, cfg.ControlMaxRetries),
 		controlPacketTTL:         time.Duration(maxF(120.0, cfg.ControlPacketTTL) * float64(time.Second)),
 		dataNackMaxGap:           maxI(0, cfg.DataNackMaxGap),
+		dataNackInitialDelay:     time.Duration(maxF(0.0, cfg.DataNackInitialDelaySeconds) * float64(time.Second)),
 		dataNackRepeatInterval:   time.Duration(maxF(0.1, cfg.DataNackRepeatSeconds) * float64(time.Second)),
 
-		isVirtual:        cfg.IsVirtual,
-		compressionType:  cfg.CompressionType,
-		lastDataNackSent: make(map[uint16]time.Time),
+		isVirtual:         cfg.IsVirtual,
+		compressionType:   cfg.CompressionType,
+		firstDataNackSeen: make(map[uint16]time.Time),
+		lastDataNackSent:  make(map[uint16]time.Time),
 	}
 
 	a.streamWorkersStarted = false
@@ -531,6 +536,7 @@ func (a *ARQ) signalWindowNotFull() {
 
 func (a *ARQ) waitWindowNotFull() {
 	timer := time.NewTimer(200 * time.Millisecond)
+	waitStarted := time.Time{}
 	defer func() {
 		if !timer.Stop() {
 			select {
@@ -542,11 +548,17 @@ func (a *ARQ) waitWindowNotFull() {
 
 	for {
 		a.mu.RLock()
-		if len(a.sndBuf) < a.limit || a.closed {
+		sndBufLen := len(a.sndBuf)
+		if sndBufLen < a.limit || a.closed {
 			a.mu.RUnlock()
 			return
 		}
 		a.mu.RUnlock()
+
+		now := time.Now()
+		if waitStarted.IsZero() {
+			waitStarted = now
+		}
 
 		if !timer.Stop() {
 			select {
@@ -602,6 +614,7 @@ func (a *ARQ) clearAllQueues(clearControl bool) {
 		a.controlSndBuf = make(map[uint32]*arqControlItem)
 	}
 	a.dataNackMu.Lock()
+	clear(a.firstDataNackSeen)
 	clear(a.lastDataNackSent)
 	a.dataNackMu.Unlock()
 
@@ -1314,6 +1327,7 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) bool {
 		if needCloseWrite {
 			a.Close("Inbound data received after local writer closed", CloseOptions{SendCloseWrite: true})
 		}
+
 		return false
 	}
 	a.lastActivity = now
@@ -1627,25 +1641,46 @@ func (a *ARQ) maybeSendDataNacks(sn uint16) {
 	}
 
 	windowSpan := uint16(a.dataNackMaxGap)
-	start := rcvNxt
-	if diff > windowSpan {
-		start = sn - windowSpan
-	}
-
 	a.mu.RLock()
 	missingSeqs := make([]uint16, 0, a.dataNackMaxGap)
-	for missing := start; missing != sn; missing++ {
-		if _, buffered := a.rcvBuf[missing]; buffered {
-			continue
+	if diff <= windowSpan {
+		for missing := rcvNxt; missing != sn; missing++ {
+			if _, buffered := a.rcvBuf[missing]; buffered {
+				continue
+			}
+			missingSeqs = append(missingSeqs, missing)
 		}
-		missingSeqs = append(missingSeqs, missing)
+	} else {
+		seen := make(map[uint16]struct{}, maxI(2, a.dataNackMaxGap/20+1))
+		sampleCount := maxI(1, (a.dataNackMaxGap+19)/20) // ~5% of configured gap, at least 1
+
+		for missing, added := rcvNxt, 0; missing != sn && added < sampleCount; missing++ {
+			if _, buffered := a.rcvBuf[missing]; buffered {
+				continue
+			}
+			missingSeqs = append(missingSeqs, missing)
+			seen[missing] = struct{}{}
+			added++
+		}
+
+		frontier := uint16(uint32(rcvNxt) + uint32(windowSpan) - 1)
+		for candidate := frontier; ; candidate-- {
+			if _, buffered := a.rcvBuf[candidate]; !buffered {
+				if _, exists := seen[candidate]; !exists {
+					missingSeqs = append(missingSeqs, candidate)
+				}
+				break
+			}
+			if candidate == rcvNxt {
+				break
+			}
+		}
 	}
 	a.mu.RUnlock()
 
 	now := time.Now()
-	minInterval := a.dataNackRepeatInterval
 	for _, missing := range missingSeqs {
-		if !a.shouldSendDataNack(missing, now, minInterval) {
+		if !a.shouldSendDataNack(missing, now) {
 			continue
 		}
 		if !a.enqueuer.PushTXPacket(
@@ -1659,15 +1694,24 @@ func (a *ARQ) maybeSendDataNacks(sn uint16) {
 	}
 }
 
-func (a *ARQ) shouldSendDataNack(sn uint16, now time.Time, minInterval time.Duration) bool {
+func (a *ARQ) shouldSendDataNack(sn uint16, now time.Time) bool {
 	a.dataNackMu.Lock()
 	defer a.dataNackMu.Unlock()
+
+	firstSeenAt, exists := a.firstDataNackSeen[sn]
+	if !exists {
+		a.firstDataNackSeen[sn] = now
+		return a.dataNackInitialDelay <= 0
+	}
+	if a.dataNackInitialDelay > 0 && now.Sub(firstSeenAt) < a.dataNackInitialDelay {
+		return false
+	}
 
 	lastSentAt, exists := a.lastDataNackSent[sn]
 	if !exists {
 		return true
 	}
-	return now.Sub(lastSentAt) >= minInterval
+	return now.Sub(lastSentAt) >= a.dataNackRepeatInterval
 }
 
 func (a *ARQ) noteDataNackSent(sn uint16, now time.Time) {
@@ -1678,6 +1722,7 @@ func (a *ARQ) noteDataNackSent(sn uint16, now time.Time) {
 
 func (a *ARQ) clearSentDataNack(sn uint16) {
 	a.dataNackMu.Lock()
+	delete(a.firstDataNackSeen, sn)
 	delete(a.lastDataNackSent, sn)
 	a.dataNackMu.Unlock()
 

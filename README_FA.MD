@@ -533,7 +533,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | پارامتر | مقدار نمونه | مقادیر مجاز / رفتار واقعی | توضیح کامل |
 | :--- | :--- | :--- | :--- |
 | `MAX_PACKETS_PER_BATCH` | `5` | clamp به `1..64` | حداکثر تعداد control blockهایی که کلاینت در یک batch کنار هم می‌گذارد.<br>برای کاهش سربار ACK و control مفید است. |
-| `ARQ_WINDOW_SIZE` | `600` | clamp به `1..4096` | اندازه پنجره ARQ است.<br>پنجره بزرگ‌تر throughput را بهتر می‌کند، ولی state و memory بیشتری مصرف می‌کند. |
+| `ARQ_WINDOW_SIZE` | `600` | clamp به `1..16384` | اندازه پنجره ARQ است.<br>پنجره بزرگ‌تر throughput را بهتر می‌کند، ولی state و memory بیشتری مصرف می‌کند. |
 | `ARQ_INITIAL_RTO_SECONDS` | `1` | clamp به `0.05..60` ثانیه | RTO اولیه برای packetهای data.<br>اگر خیلی کم باشد resendهای بی‌مورد زیاد می‌شود. |
 | `ARQ_MAX_RTO_SECONDS` | `5.0` | clamp به `[ARQ_INITIAL_RTO_SECONDS, 120]` | سقف RTO برای data. |
 | `ARQ_CONTROL_INITIAL_RTO_SECONDS` | `0.5` | clamp به `0.05..60` ثانیه | RTO اولیه برای packetهای control مثل close/ack/setup. |
@@ -647,7 +647,7 @@ sudo journalctl -u masterdnsvpn-client -f
 | `STREAM_SETUP_ACK_TTL_SECONDS` | `400.0` | clamp به `1..86400` ثانیه | TTL packetهای ACK مربوط به setup stream. |
 | `STREAM_RESULT_PACKET_TTL_SECONDS` | `300.0` | clamp به `1..86400` ثانیه | TTL packetهای result مثل connect success/failure که باید به کلاینت برسند. |
 | `STREAM_FAILURE_PACKET_TTL_SECONDS` | `120.0` | clamp به `1..86400` ثانیه | TTL packetهای failure برای setup/outbound. |
-| `ARQ_WINDOW_SIZE` | `600` | clamp به `1..4096` | اندازه پنجره ARQ هر stream در سرور. |
+| `ARQ_WINDOW_SIZE` | `600` | clamp به `1..16384` | اندازه پنجره ARQ هر stream در سرور. |
 | `ARQ_INITIAL_RTO_SECONDS` | `1` | clamp به `0.05..60` ثانیه | RTO اولیه packetهای data. |
 | `ARQ_MAX_RTO_SECONDS` | `5.0` | clamp به `[ARQ_INITIAL_RTO_SECONDS, 120]` | سقف RTO data. |
 | `ARQ_CONTROL_INITIAL_RTO_SECONDS` | `0.5` | clamp به `0.05..60` ثانیه | RTO اولیه packetهای control. |
