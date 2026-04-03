@@ -317,8 +317,8 @@ func (a *ARQ) State() StreamState {
 }
 
 func (a *ARQ) HasPendingSequence(sn uint16) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	_, ok := a.sndBuf[sn]
 	return ok
 }
@@ -551,7 +551,7 @@ func (a *ARQ) signalWindowNotFull() {
 }
 
 func (a *ARQ) waitWindowNotFull() {
-	timer := time.NewTimer(200 * time.Millisecond)
+	timer := time.NewTimer(50 * time.Millisecond)
 	waitStarted := time.Time{}
 	defer func() {
 		if !timer.Stop() {
@@ -582,7 +582,7 @@ func (a *ARQ) waitWindowNotFull() {
 			default:
 			}
 		}
-		timer.Reset(200 * time.Millisecond)
+		timer.Reset(50 * time.Millisecond)
 
 		select {
 		case <-a.windowNotFull:
@@ -981,14 +981,15 @@ func (a *ARQ) ioLoop() {
 			transientReadSince = time.Time{}
 			raw := append([]byte(nil), buf[:n]...)
 
+			now := time.Now()
 			a.mu.Lock()
-			a.lastActivity = time.Now()
+			a.lastActivity = now
 			sn := a.sndNxt
 			a.sndNxt++
 			currentRTO := a.currentDataBaseRTO()
 			a.sndBuf[sn] = &arqDataItem{
 				Data:            raw,
-				CreatedAt:       time.Now(),
+				CreatedAt:       now,
 				LastSentAt:      time.Time{},
 				Dispatched:      false,
 				Retries:         0,
@@ -1256,7 +1257,7 @@ func (a *ARQ) retransmitLoop() {
 			rtoFactor = a.controlRto
 		}
 
-		baseInterval := max(rtoFactor/3, 20*time.Millisecond)
+		baseInterval := max(rtoFactor/3, 50*time.Millisecond)
 
 		hasPending := len(a.sndBuf) > 0 || (a.enableControlReliability && len(a.controlSndBuf) > 0)
 		a.mu.Unlock()
@@ -1417,10 +1418,21 @@ func (a *ARQ) writeLoop() {
 	defer a.wg.Done()
 
 	for {
-		select {
-		case <-a.ctx.Done():
-			return
-		case <-a.flushSignal:
+		// Check rcvBuf before blocking — signals may have been coalesced
+		// while we were writing, so data can be ready without a new signal.
+		a.mu.RLock()
+		hasReady := false
+		if _, ok := a.rcvBuf[a.rcvNxt]; ok {
+			hasReady = true
+		}
+		a.mu.RUnlock()
+
+		if !hasReady {
+			select {
+			case <-a.ctx.Done():
+				return
+			case <-a.flushSignal:
+			}
 		}
 
 		for {
