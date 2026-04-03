@@ -210,11 +210,11 @@ type ARQ struct {
 	lastDataNackSent  map[uint16]time.Time
 
 	// Concurrency
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	flushSignal chan struct{}
-	rxChan      chan rxPayload
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	flushSignal    chan struct{}
+	rxChan         chan rxPayload
 	pendingInbound int
 }
 
@@ -1413,6 +1413,8 @@ func (a *ARQ) processReceivedData(sn uint16, data []byte) {
 func (a *ARQ) writeLoop() {
 	defer a.wg.Done()
 
+	const maxRetainedMergeBuf = 256 * 1024
+
 	var mergeBuf []byte // reusable merge buffer across iterations
 
 	for {
@@ -1482,16 +1484,23 @@ func (a *ARQ) writeLoop() {
 				for _, chunk := range toWrite {
 					totalSize += len(chunk)
 				}
-				if cap(mergeBuf) >= totalSize {
-					mergeBuf = mergeBuf[:0]
+
+				merged := mergeBuf
+				if totalSize <= maxRetainedMergeBuf {
+					if cap(merged) >= totalSize {
+						merged = merged[:0]
+					} else {
+						merged = make([]byte, 0, totalSize)
+					}
+					mergeBuf = merged
 				} else {
-					mergeBuf = make([]byte, 0, totalSize)
+					merged = make([]byte, 0, totalSize)
 				}
 				for _, chunk := range toWrite {
-					mergeBuf = append(mergeBuf, chunk...)
+					merged = append(merged, chunk...)
 				}
 				toWrite = toWrite[:1]
-				toWrite[0] = mergeBuf
+				toWrite[0] = merged
 			}
 
 			shouldExit := false
