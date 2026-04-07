@@ -75,6 +75,7 @@ type Balancer struct {
 	healthRRCounter  atomic.Uint64
 	rngState         atomic.Uint64
 	nextPendingSweep atomic.Int64
+	pendingOverflow  atomic.Bool
 
 	mu           sync.RWMutex
 	log          *logger.Logger
@@ -172,6 +173,7 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		clear(b.pending)
 	}
 	b.pendingMu.Unlock()
+	b.pendingOverflow.Store(false)
 
 	if b.streamRoutes == nil {
 		b.streamRoutes = make(map[uint16]*balancerStreamRouteState)
@@ -428,16 +430,18 @@ func (b *Balancer) TrackResolverSend(
 	}
 
 	requestTimeout := resolverRequestTimeout(tunnelPacketTimeout, checkInterval, window)
-	ttl := resolverSampleTTL(tunnelPacketTimeout)
-	var timeoutObservations []balancerTimeoutObservation
 
 	b.pendingMu.Lock()
+	_, exists := b.pending[key]
 	if len(b.pending) >= resolverPendingSoftCap {
-		var nextDue time.Time
-		timeoutObservations, nextDue = b.prunePendingLocked(sentAt, requestTimeout, ttl)
-		b.setNextPendingSweepLocked(nextDue)
-		if overflow := len(b.pending) - resolverPendingHardCap; overflow >= 0 {
-			b.evictPendingLocked(overflow + 1)
+		b.pendingOverflow.Store(true)
+		b.setNextPendingSweepLocked(sentAt)
+		if len(b.pending) >= resolverPendingHardCap {
+			extra := len(b.pending) - resolverPendingHardCap
+			if !exists {
+				extra++
+			}
+			b.evictSomePendingLocked(extra)
 		}
 	}
 	b.pending[key] = balancerResolverSample{
@@ -446,10 +450,6 @@ func (b *Balancer) TrackResolverSend(
 	}
 	b.schedulePendingSweepAt(sentAt.Add(requestTimeout))
 	b.pendingMu.Unlock()
-
-	for _, observation := range timeoutObservations {
-		b.ReportTimeout(observation.serverKey, observation.at, window, 1, 1)
-	}
 
 	b.ReportSend(serverKey)
 	if stats := b.statsForKey(serverKey); stats != nil {
@@ -553,7 +553,7 @@ func (b *Balancer) CollectExpiredResolverTimeouts(
 	if !autoDisable {
 		return
 	}
-	if !b.pendingSweepDue(now) {
+	if !b.pendingOverflow.Load() && !b.pendingSweepDue(now) {
 		return
 	}
 
@@ -562,8 +562,12 @@ func (b *Balancer) CollectExpiredResolverTimeouts(
 
 	b.pendingMu.Lock()
 	timeoutObservations, nextDue := b.prunePendingLocked(now, requestTimeout, ttl)
+	if overflow := len(b.pending) - resolverPendingHardCap; overflow >= 0 {
+		b.evictPendingLocked(overflow + 1)
+	}
 	b.setNextPendingSweepLocked(nextDue)
 	b.pendingMu.Unlock()
+	b.pendingOverflow.Store(false)
 
 	for _, observation := range timeoutObservations {
 		b.ReportTimeout(observation.serverKey, observation.at, window, minObservations, 1)
@@ -1277,6 +1281,20 @@ func (b *Balancer) evictPendingLocked(evictCount int) {
 	}
 	for i := 0; i < evictCount; i++ {
 		delete(b.pending, entries[i].key)
+	}
+}
+
+func (b *Balancer) evictSomePendingLocked(evictCount int) {
+	if b == nil || evictCount <= 0 || len(b.pending) == 0 {
+		return
+	}
+
+	for key := range b.pending {
+		delete(b.pending, key)
+		evictCount--
+		if evictCount <= 0 {
+			return
+		}
 	}
 }
 
