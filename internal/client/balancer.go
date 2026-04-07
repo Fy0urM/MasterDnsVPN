@@ -1280,6 +1280,16 @@ func (b *Balancer) evictPendingLocked(evictCount int) {
 	}
 }
 
+func (b *Balancer) GetUniqueConnections(requiredCount int) []Connection {
+	if b == nil {
+		return nil
+	}
+
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.getUniqueConnectionsLocked(requiredCount)
+}
+
 func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {
 	count := normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
 	if count <= 0 {

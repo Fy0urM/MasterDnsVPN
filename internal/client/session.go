@@ -354,7 +354,7 @@ func (c *Client) selectSessionCloseTargets(maxTargets int) []Connection {
 		maxTargets = 1
 	}
 
-	targets := c.balancer.getUniqueConnectionsLocked(maxTargets)
+	targets := c.balancer.GetUniqueConnections(maxTargets)
 	if len(targets) > 0 {
 		return targets
 	}
