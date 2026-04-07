@@ -292,32 +292,6 @@ func (b *Balancer) ReportSuccess(serverKey string, rtt time.Duration) {
 	stats.mu.Unlock()
 }
 
-func (b *Balancer) ReportSendWindow(serverKey string, now time.Time, window time.Duration) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	conn, ok := b.connectionByKeyLocked(serverKey)
-	if !ok || !conn.IsValid {
-		return false
-	}
-
-	b.ensureWindowLocked(conn, now, window)
-	conn.WindowSent++
-	return true
-}
-
-func (b *Balancer) ReportSuccessWindow(serverKey string, now time.Time, window time.Duration, rtt time.Duration) bool {
-	if rtt > 0 {
-		b.ReportSuccess(serverKey, rtt)
-	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	conn, ok := b.connectionByKeyLocked(serverKey)
-	return ok && conn.IsValid
-}
-
 func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window time.Duration, minObservations int, minActive int) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -420,7 +394,12 @@ func (b *Balancer) TrackResolverSend(
 	}
 
 	b.ReportSend(serverKey)
-	b.ReportSendWindow(serverKey, sentAt, window)
+	b.mu.Lock()
+	if conn, ok := b.connectionByKeyLocked(serverKey); ok && conn.IsValid {
+		b.ensureWindowLocked(conn, sentAt, window)
+		conn.WindowSent++
+	}
+	b.mu.Unlock()
 }
 
 func (b *Balancer) TrackResolverSuccess(
@@ -457,7 +436,9 @@ func (b *Balancer) TrackResolverSuccess(
 	if !sample.sentAt.IsZero() && !receivedAt.Before(sample.sentAt) {
 		rtt = receivedAt.Sub(sample.sentAt)
 	}
-	b.ReportSuccessWindow(sample.serverKey, receivedAt, window, rtt)
+	if rtt > 0 {
+		b.ReportSuccess(sample.serverKey, rtt)
+	}
 }
 
 func (b *Balancer) TrackResolverFailure(
