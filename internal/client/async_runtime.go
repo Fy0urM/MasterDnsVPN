@@ -547,7 +547,7 @@ func (c *Client) asyncPlanEncodeWorker(ctx context.Context, id int) {
 				conns []Connection
 				err   error
 			)
-			conns, err = c.runtime.SelectTargetsForPacketCount(c, task.opts.PacketType, task.opts.StreamID, targetCount)
+			conns, err = c.balancer.SelectTargets(task.opts.PacketType, task.opts.StreamID, targetCount)
 			if err != nil {
 				conns = nil
 			}

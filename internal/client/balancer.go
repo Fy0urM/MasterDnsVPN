@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	Enums "masterdnsvpn-go/internal/enums"
 )
 
 const (
@@ -40,6 +42,12 @@ type Connection struct {
 	WindowTimedOut    uint32
 }
 
+type balancerStreamRouteState struct {
+	PreferredResolverKey string
+	ResendStreak         int
+	LastFailoverAt       time.Time
+}
+
 type Balancer struct {
 	strategy        int
 	rrCounter       atomic.Uint64
@@ -47,12 +55,16 @@ type Balancer struct {
 	rngState        atomic.Uint64
 	version         atomic.Uint64
 
-	mu          sync.RWMutex
-	connections []Connection
-	indexByKey  map[string]int
-	activeIDs   []int
-	inactiveIDs []int
-	stats       []*connectionStats
+	mu           sync.RWMutex
+	connections  []Connection
+	indexByKey   map[string]int
+	activeIDs    []int
+	inactiveIDs  []int
+	stats        []*connectionStats
+	streamRoutes map[uint16]*balancerStreamRouteState
+
+	streamFailoverThreshold int
+	streamFailoverCooldown  time.Duration
 }
 
 type connectionStats struct {
@@ -66,9 +78,31 @@ type connectionStats struct {
 const connectionStatsHalfLifeThreshold = 1000
 
 func NewBalancer(strategy int) *Balancer {
-	b := &Balancer{strategy: strategy}
+	b := &Balancer{
+		strategy:                strategy,
+		streamRoutes:            make(map[uint16]*balancerStreamRouteState),
+		streamFailoverThreshold: 1,
+		streamFailoverCooldown:  time.Second,
+	}
 	b.rngState.Store(seedRNG())
 	return b
+}
+
+func (b *Balancer) SetStreamFailoverConfig(threshold int, cooldown time.Duration) {
+	if b == nil {
+		return
+	}
+	if threshold < 1 {
+		threshold = 1
+	}
+	if cooldown <= 0 {
+		cooldown = time.Second
+	}
+
+	b.mu.Lock()
+	b.streamFailoverThreshold = threshold
+	b.streamFailoverCooldown = cooldown
+	b.mu.Unlock()
 }
 
 func (b *Balancer) SetConnections(connections []*Connection) {
@@ -81,6 +115,11 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 	b.activeIDs = make([]int, 0, size)
 	b.inactiveIDs = make([]int, 0, size)
 	b.stats = make([]*connectionStats, 0, size)
+	if b.streamRoutes == nil {
+		b.streamRoutes = make(map[uint16]*balancerStreamRouteState)
+	} else {
+		clear(b.streamRoutes)
+	}
 
 	for _, conn := range connections {
 		if conn == nil || conn.Key == "" {
@@ -145,6 +184,8 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 	b.connections[idx].IsValid = valid
 	if valid {
 		b.resetWindowLocked(&b.connections[idx])
+	} else {
+		b.clearPreferredResolverReferencesLocked(key)
 	}
 	b.rebuildStateIndicesLocked()
 	return true
@@ -182,6 +223,8 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	conn.IsValid = active
 	if active {
 		b.resetWindowLocked(conn)
+	} else {
+		b.clearPreferredResolverReferencesLocked(key)
 	}
 	b.rebuildStateIndicesLocked()
 	return true
@@ -276,6 +319,7 @@ func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window t
 
 	conn.IsValid = false
 	b.resetWindowLocked(conn)
+	b.clearPreferredResolverReferencesLocked(serverKey)
 	b.rebuildStateIndicesLocked()
 	return true
 }
@@ -477,6 +521,87 @@ func (b *Balancer) NextInactiveConnectionForHealthCheck(now time.Time, minInterv
 	return Connection{}, false
 }
 
+func (b *Balancer) EnsureStream(streamID uint16) {
+	if b == nil || streamID == 0 {
+		return
+	}
+
+	b.mu.Lock()
+	b.ensureStreamRouteLocked(streamID)
+	b.mu.Unlock()
+}
+
+func (b *Balancer) CleanupStream(streamID uint16) {
+	if b == nil || streamID == 0 {
+		return
+	}
+
+	b.mu.Lock()
+	delete(b.streamRoutes, streamID)
+	b.mu.Unlock()
+}
+
+func (b *Balancer) NoteStreamProgress(streamID uint16) {
+	if b == nil || streamID == 0 {
+		return
+	}
+
+	b.mu.Lock()
+	if state := b.ensureStreamRouteLocked(streamID); state != nil {
+		state.ResendStreak = 0
+	}
+	b.mu.Unlock()
+}
+
+func (b *Balancer) SelectTargets(packetType uint8, streamID uint16, requiredCount int) ([]Connection, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	requiredCount = normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
+	if requiredCount <= 0 {
+		return nil, ErrNoValidConnections
+	}
+
+	if !isBalancerStreamDataLike(packetType) || streamID == 0 {
+		selected := b.getUniqueConnectionsLocked(requiredCount)
+		if len(selected) == 0 {
+			return nil, ErrNoValidConnections
+		}
+		return selected, nil
+	}
+
+	state := b.ensureStreamRouteLocked(streamID)
+	preferred, ok := b.selectPreferredConnectionForStreamLocked(packetType, state)
+	if !ok {
+		selected := b.getUniqueConnectionsLocked(requiredCount)
+		if len(selected) == 0 {
+			return nil, ErrNoValidConnections
+		}
+		return selected, nil
+	}
+
+	if requiredCount <= 1 {
+		return []Connection{preferred}, nil
+	}
+
+	selected := make([]Connection, 0, requiredCount)
+	selected = append(selected, preferred)
+	for _, conn := range b.getUniqueConnectionsLocked(requiredCount) {
+		if !conn.IsValid || conn.Key == "" || conn.Key == preferred.Key {
+			continue
+		}
+		selected = append(selected, conn)
+		if len(selected) >= requiredCount {
+			break
+		}
+	}
+
+	if len(selected) == 0 {
+		return nil, ErrNoValidConnections
+	}
+	return selected, nil
+}
+
 func (b *Balancer) AverageRTT(serverKey string) (time.Duration, bool) {
 	stats := b.statsForKey(serverKey)
 	if stats == nil {
@@ -503,6 +628,103 @@ func (b *Balancer) connectionsByIDsLocked(ids []int) []Connection {
 		result[i] = b.connections[idx]
 	}
 	return result
+}
+
+func (b *Balancer) ensureStreamRouteLocked(streamID uint16) *balancerStreamRouteState {
+	if streamID == 0 {
+		return nil
+	}
+	state := b.streamRoutes[streamID]
+	if state == nil {
+		state = &balancerStreamRouteState{}
+		b.streamRoutes[streamID] = state
+	}
+	return state
+}
+
+func isBalancerStreamDataLike(packetType uint8) bool {
+	return packetType == Enums.PACKET_STREAM_DATA || packetType == Enums.PACKET_STREAM_RESEND
+}
+
+func (b *Balancer) selectPreferredConnectionForStreamLocked(packetType uint8, state *balancerStreamRouteState) (Connection, bool) {
+	if state == nil {
+		return Connection{}, false
+	}
+
+	if packetType == Enums.PACKET_STREAM_RESEND {
+		state.ResendStreak++
+		if current, ok := b.validPreferredConnectionLocked(state); ok {
+			if state.ResendStreak < b.streamFailoverThreshold {
+				return current, true
+			}
+			if !state.LastFailoverAt.IsZero() && time.Since(state.LastFailoverAt) < b.streamFailoverCooldown {
+				return current, true
+			}
+			if replacement, ok := b.selectAlternateConnectionLocked(current.Key); ok {
+				state.PreferredResolverKey = replacement.Key
+				state.ResendStreak = 0
+				state.LastFailoverAt = time.Now()
+				return replacement, true
+			}
+			return current, true
+		}
+	}
+
+	if current, ok := b.validPreferredConnectionLocked(state); ok {
+		return current, true
+	}
+
+	replacement, ok := b.selectAlternateConnectionLocked(state.PreferredResolverKey)
+	if !ok {
+		return Connection{}, false
+	}
+	state.PreferredResolverKey = replacement.Key
+	state.ResendStreak = 0
+	return replacement, true
+}
+
+func (b *Balancer) validPreferredConnectionLocked(state *balancerStreamRouteState) (Connection, bool) {
+	if state == nil || state.PreferredResolverKey == "" {
+		return Connection{}, false
+	}
+	conn, ok := b.connectionByKeyLocked(state.PreferredResolverKey)
+	if !ok || !conn.IsValid || conn.Key == "" {
+		return Connection{}, false
+	}
+	return *conn, true
+}
+
+func (b *Balancer) selectAlternateConnectionLocked(excludeKey string) (Connection, bool) {
+	if excludeKey != "" {
+		if replacement, ok := b.getBestConnectionExcludingLocked(excludeKey); ok {
+			return replacement, true
+		}
+	}
+
+	selected := b.getUniqueConnectionsLocked(1)
+	if len(selected) == 0 {
+		return Connection{}, false
+	}
+	if excludeKey == "" || selected[0].Key != excludeKey {
+		return selected[0], true
+	}
+	if replacement, ok := b.getBestConnectionExcludingLocked(excludeKey); ok {
+		return replacement, true
+	}
+	return Connection{}, false
+}
+
+func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
+	if serverKey == "" {
+		return
+	}
+	for _, state := range b.streamRoutes {
+		if state == nil || state.PreferredResolverKey != serverKey {
+			continue
+		}
+		state.PreferredResolverKey = ""
+		state.ResendStreak = 0
+	}
 }
 
 func (b *Balancer) rebuildStateIndicesLocked() {
@@ -584,6 +806,38 @@ func normalizeRequiredCount(validCount, requiredCount, defaultIfInvalid int) int
 	return requiredCount
 }
 
+func (b *Balancer) getUniqueConnectionsLocked(requiredCount int) []Connection {
+	count := normalizeRequiredCount(len(b.activeIDs), requiredCount, 1)
+	if count <= 0 {
+		return nil
+	}
+
+	if count == 1 {
+		best, ok := b.getBestConnectionLocked()
+		if !ok {
+			return nil
+		}
+		return []Connection{best}
+	}
+
+	switch b.strategy {
+	case BalancingRandom:
+		return b.selectRandomLocked(count)
+	case BalancingLeastLoss:
+		if !b.hasLossSignalLocked() {
+			return b.selectRoundRobinLocked(count)
+		}
+		return b.selectLowestScoreLocked(count, b.lossScoreLocked)
+	case BalancingLowestLatency:
+		if !b.hasLatencySignalLocked() {
+			return b.selectRoundRobinLocked(count)
+		}
+		return b.selectLowestScoreLocked(count, b.latencyScoreLocked)
+	default:
+		return b.selectRoundRobinLocked(count)
+	}
+}
+
 func (b *Balancer) getBestConnectionLocked() (Connection, bool) {
 	switch b.strategy {
 	case BalancingRandom:
@@ -601,6 +855,32 @@ func (b *Balancer) getBestConnectionLocked() (Connection, bool) {
 		return b.bestScoredConnectionLocked(b.latencyScoreLocked)
 	default:
 		return b.roundRobinBestConnectionLocked()
+	}
+}
+
+func (b *Balancer) getBestConnectionExcludingLocked(excludeKey string) (Connection, bool) {
+	switch b.strategy {
+	case BalancingRandom:
+		ordered := b.rotatedActiveIndicesLocked(1)
+		for _, idx := range ordered {
+			if b.connections[idx].Key == excludeKey {
+				continue
+			}
+			return b.connections[idx], true
+		}
+		return Connection{}, false
+	case BalancingLeastLoss:
+		if !b.hasLossSignalLocked() {
+			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
+		}
+		return b.bestScoredConnectionExcludingLocked(b.lossScoreLocked, excludeKey)
+	case BalancingLowestLatency:
+		if !b.hasLatencySignalLocked() {
+			return b.roundRobinBestConnectionExcludingLocked(excludeKey)
+		}
+		return b.bestScoredConnectionExcludingLocked(b.latencyScoreLocked, excludeKey)
+	default:
+		return b.roundRobinBestConnectionExcludingLocked(excludeKey)
 	}
 }
 

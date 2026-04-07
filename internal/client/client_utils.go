@@ -284,7 +284,7 @@ func (c *Client) consumeInboundStreamAck(packetType uint8, packet VpnProto.Packe
 
 	handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
 	if handledAck {
-		c.runtime.noteStreamProgress(packet.StreamID)
+		c.balancer.NoteStreamProgress(packet.StreamID)
 	}
 
 	if _, ok := Enums.GetPacketCloseStream(packet.PacketType); handledAck && ok {

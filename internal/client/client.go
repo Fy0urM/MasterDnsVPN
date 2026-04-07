@@ -280,6 +280,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		c.streamResolverFailoverCooldown = time.Second
 	}
 
+	c.balancer.SetStreamFailoverConfig(c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.runtime = NewResolverRuntime(c.balancer, cfg.RecheckBatchSize, c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.pingManager = newPingManager(c)
 	return c
@@ -463,7 +464,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		}
 
 		if arqObj.HandleDataNack(packet.SequenceNum) {
-			c.runtime.noteStreamProgress(packet.StreamID)
+			c.balancer.NoteStreamProgress(packet.StreamID)
 		}
 	case Enums.PACKET_STREAM_CONNECTED:
 		return c.handleStreamConnected(packet, s, arqObj)
@@ -483,7 +484,7 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 	default:
 		handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
 		if handledAck {
-			c.runtime.noteStreamProgress(packet.StreamID)
+			c.balancer.NoteStreamProgress(packet.StreamID)
 		}
 		if _, ok := Enums.GetPacketCloseStream(packet.PacketType); handledAck && ok {
 			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {

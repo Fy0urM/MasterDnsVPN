@@ -172,7 +172,7 @@ func (c *Client) new_stream(streamID uint16, conn net.Conn, targetPayload []byte
 	}
 
 	if streamID != 0 {
-		c.runtime.ensureStreamPreferredConnection(c, streamID)
+		c.balancer.EnsureStream(streamID)
 	}
 
 	return s
@@ -340,7 +340,7 @@ func (s *Stream_client) finalizeAfterARQClose() {
 
 	s.cleanupOnce.Do(func() {
 		if s.client != nil {
-		s.client.runtime.cleanupStream(s.StreamID)
+			s.client.balancer.CleanupStream(s.StreamID)
 			s.client.streamsMu.Lock()
 			if current, ok := s.client.active_streams[s.StreamID]; ok && current == s {
 				delete(s.client.active_streams, s.StreamID)

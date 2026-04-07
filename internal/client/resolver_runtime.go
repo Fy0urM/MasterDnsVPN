@@ -26,6 +26,10 @@ type resolverHealthState struct {
 	LastSuccessAt    time.Time
 }
 
+type resolverRecheckState struct{}
+
+type resolverDisabledState struct{}
+
 // ResolverRuntime is the owner for resolver catalog and runtime resolver state.
 type ResolverRuntime struct {
 	mu         sync.RWMutex
@@ -202,9 +206,46 @@ func (r *ResolverRuntime) cleanupStream(streamID uint16) {
 	if r == nil || streamID == 0 {
 		return
 	}
+	if r.balancer != nil {
+		r.balancer.CleanupStream(streamID)
+	}
 	r.streamMu.Lock()
 	delete(r.streamRoutes, streamID)
 	r.streamMu.Unlock()
+}
+
+func (r *ResolverRuntime) SelectTargetsForPacket(c *Client, packetType uint8, streamID uint16) ([]Connection, error) {
+	targetCount := 1
+	if c != nil {
+		targetCount = c.runtimePacketDuplicationCount(packetType)
+	}
+	return r.SelectTargetsForPacketCount(c, packetType, streamID, targetCount)
+}
+
+func (r *ResolverRuntime) SelectTargetsForPacketCount(_ *Client, packetType uint8, streamID uint16, targetCount int) ([]Connection, error) {
+	if r == nil || r.balancer == nil {
+		return nil, ErrNoValidConnections
+	}
+	return r.balancer.SelectTargets(packetType, streamID, targetCount)
+}
+
+func (r *ResolverRuntime) noteStreamProgress(streamID uint16) {
+	if r == nil || r.balancer == nil {
+		return
+	}
+	r.balancer.NoteStreamProgress(streamID)
+}
+
+func (r *ResolverRuntime) ensureStreamPreferredConnection(_ *Client, streamID uint16) (Connection, bool) {
+	if r == nil || r.balancer == nil || streamID == 0 {
+		return Connection{}, false
+	}
+	r.balancer.EnsureStream(streamID)
+	selected, err := r.balancer.SelectTargets(0, streamID, 1)
+	if err != nil || len(selected) == 0 {
+		return Connection{}, false
+	}
+	return selected[0], true
 }
 
 func (r *ResolverRuntime) NoteSend(serverKey string) {
@@ -354,9 +395,8 @@ func (c *Client) GetConnectionByKey(key string) (Connection, bool) {
 	if c.runtime != nil {
 		return c.runtime.GetConnectionByKey(key)
 	}
-	idx, ok := c.connectionsByKey[key]
-	if !ok || idx < 0 || idx >= len(c.connections) {
-		return Connection{}, false
+	if c.balancer != nil {
+		return c.balancer.GetConnectionByKey(key)
 	}
-	return c.connections[idx], true
+	return Connection{}, false
 }
